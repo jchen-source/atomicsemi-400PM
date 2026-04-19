@@ -47,68 +47,66 @@ export default async function GanttPage() {
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">Roadmap</h1>
-          <p className="text-sm text-muted-foreground">
-            Drag bars to reschedule, drag the right edge to resize, drag from
-            one bar to another to link. Dependencies auto-push successors.
-          </p>
+    <div className="roadmap-page space-y-3">
+      <header className="roadmap-header">
+        <div className="roadmap-title-block">
+          <h1 className="roadmap-title">Roadmap</h1>
+          <div className="roadmap-stats">
+            <span className="roadmap-stat-pill">
+              <span className="roadmap-stat-value">{tasks.length}</span>
+              <span className="roadmap-stat-label">tasks</span>
+            </span>
+            <span className="roadmap-stat-pill">
+              <span className="roadmap-stat-value">{deps.length}</span>
+              <span className="roadmap-stat-label">links</span>
+            </span>
+            {hasNotion && latestSync && (
+              <span
+                className="roadmap-stat-pill roadmap-stat-pill--muted"
+                title={`Imported ${latestSync.imported}, skipped ${latestSync.skipped}, failed ${latestSync.failed}`}
+              >
+                Synced {new Date(latestSync.runAt).toLocaleDateString()}
+              </span>
+            )}
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <span className="text-sm text-muted-foreground">
-            {tasks.length} tasks · {deps.length} links
-          </span>
-          <Link
-            href="/settings"
-            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium hover:bg-accent"
-          >
-            <span aria-hidden>{"\u2699"}</span>
+        <div className="roadmap-actions">
+          <Link href="/settings" className="roadmap-btn roadmap-btn--ghost">
             Settings
           </Link>
           <Link
             href="/settings#notion"
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"
+            className={
+              hasNotion
+                ? "roadmap-btn roadmap-btn--ghost"
+                : "roadmap-btn roadmap-btn--primary"
+            }
           >
-            <span aria-hidden>{"\u2B22"}</span>
-            {hasNotion ? "Sync with Notion" : "Connect Notion"}
+            {hasNotion ? "Sync Notion" : "Connect Notion"}
           </Link>
-          <CleanupDefaultsButton />
         </div>
-      </div>
+      </header>
 
-      {!hasNotion && (
-        <div className="rounded-lg border border-dashed border-border bg-muted/40 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-sm font-medium">Import your Notion roadmap</p>
-              <p className="text-sm text-muted-foreground">
-                The sample data below is a placeholder. Paste your Notion
-                integration token and database IDs on the Settings page to pull
-                your real roadmap and issues. Re-sync is additive — your local
-                edits are never overwritten.
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <ImportBacklogButton />
-              <Link
-                href="/settings#notion"
-                className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"
-              >
-                Connect Notion
-              </Link>
-            </div>
+      {!hasNotion && tasks.length > 0 && (
+        <div className="roadmap-notice">
+          <div>
+            <p className="roadmap-notice-title">
+              You&apos;re working from local data
+            </p>
+            <p className="roadmap-notice-body">
+              Connect Notion to pull your real roadmap and issues. Re-sync is
+              additive — local edits are preserved.
+            </p>
           </div>
-        </div>
-      )}
-
-      {hasNotion && latestSync && (
-        <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-          Last Notion sync{" "}
-          {new Date(latestSync.runAt).toLocaleString()} · imported{" "}
-          {latestSync.imported}, skipped {latestSync.skipped}, failed{" "}
-          {latestSync.failed}
+          <div className="flex flex-wrap items-center gap-2">
+            <ImportBacklogButton />
+            <Link
+              href="/settings#notion"
+              className="roadmap-btn roadmap-btn--ghost"
+            >
+              Connect
+            </Link>
+          </div>
         </div>
       )}
 
@@ -153,7 +151,37 @@ export default async function GanttPage() {
           target: d.dependentId,
           type: depTypeToLinkType(d.type),
         }))}
+        emptyState={
+          tasks.length === 0 ? (
+            <div className="roadmap-empty">
+              <p className="roadmap-empty-title">
+                Your roadmap is empty
+              </p>
+              <p className="roadmap-empty-body">
+                Add a task to start planning, or pull your existing programs in
+                from the committed Notion backlog.
+              </p>
+              <div className="roadmap-empty-actions">
+                <ImportBacklogButton />
+                <Link
+                  href="/settings#notion"
+                  className="roadmap-btn roadmap-btn--ghost"
+                >
+                  Connect Notion
+                </Link>
+              </div>
+            </div>
+          ) : null
+        }
       />
+
+      <footer className="roadmap-footer">
+        <CleanupDefaultsButton />
+        <span className="roadmap-footer-hint">
+          Drag bars to reschedule · drag edges to resize · drag from one bar to
+          another to link
+        </span>
+      </footer>
     </div>
   );
 }

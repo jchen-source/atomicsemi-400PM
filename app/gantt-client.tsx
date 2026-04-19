@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import "@svar-ui/react-gantt/all.css";
 import "./gantt-theme.css";
@@ -121,10 +122,13 @@ const ZOOM_SCALES: Record<
 export default function GanttClient({
   tasks,
   links,
+  emptyState,
 }: {
   tasks: GanttTaskInput[];
   links: GanttLinkInput[];
+  emptyState?: React.ReactNode;
 }) {
+  const router = useRouter();
   const apiRef = useRef<{
     exec: (action: string, payload: unknown) => void;
     on: (action: string, cb: (data: unknown) => boolean | void) => void;
@@ -622,7 +626,8 @@ export default function GanttClient({
       if (!res.ok) throw new Error(await res.text());
       markSaved();
       setStatus("Task added.");
-      window.location.reload();
+      router.refresh();
+      setTimeout(() => setStatus(""), 1200);
     } catch (e: unknown) {
       setStatus(e instanceof Error ? e.message : "Add task failed");
     } finally {
@@ -636,12 +641,13 @@ export default function GanttClient({
     const start = new Date(parent.start);
     const end = new Date(parent.end);
     const childType = parent.rowType === "ISSUE" ? "ISSUE" : "TASK";
+    setStatus(`Adding subtask under ${parent.text}…`);
     try {
       const res = await fetch("/api/tasks", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          title: "New Task",
+          title: "New Subtask",
           description: "",
           type: childType,
           status: "TODO",
@@ -654,8 +660,10 @@ export default function GanttClient({
         }),
       });
       if (!res.ok) throw new Error(await res.text());
-      setStatus(`Task added under ${parent.text}.`);
-      window.location.reload();
+      markSaved();
+      setStatus(`Subtask added under ${parent.text}.`);
+      router.refresh();
+      setTimeout(() => setStatus(""), 1200);
     } catch (e: unknown) {
       setStatus(e instanceof Error ? e.message : "Add task failed");
     }
@@ -668,8 +676,10 @@ export default function GanttClient({
     try {
       const res = await fetch(`/api/tasks/${taskId}`, { method: "DELETE" });
       if (!res.ok) throw new Error(await res.text());
+      markSaved();
       setStatus(`${t?.text ?? "Task"} deleted.`);
-      window.location.reload();
+      router.refresh();
+      setTimeout(() => setStatus(""), 1200);
     } catch (e: unknown) {
       setStatus(e instanceof Error ? e.message : "Delete failed");
     }
@@ -728,7 +738,9 @@ export default function GanttClient({
       if (!res.ok) throw new Error(data?.error ?? "Failed to save dependencies");
       setDepEditorTaskId(null);
       setStatus("Dependencies updated.");
-      window.location.reload();
+      markSaved();
+      router.refresh();
+      setTimeout(() => setStatus(""), 1200);
     } catch (e: unknown) {
       setStatus(e instanceof Error ? e.message : "Failed to save dependencies");
     } finally {
@@ -787,6 +799,7 @@ export default function GanttClient({
             </button>
           ))}
         </div>
+        <div className="gantt-controls-divider" aria-hidden />
         <button
           type="button"
           onClick={createTopLevelTask}
@@ -794,7 +807,7 @@ export default function GanttClient({
           title="Create a new top-level task"
           disabled={addingTask}
         >
-          {addingTask ? "Adding…" : "+ New Task"}
+          {addingTask ? "Adding…" : "+ New task"}
         </button>
         <button
           type="button"
@@ -802,45 +815,50 @@ export default function GanttClient({
           className="gantt-linkmode-btn"
           title="Create sequential dependencies with one click"
         >
-          Auto Dependencies
+          Auto-link
         </button>
         <button
           type="button"
           onClick={() => {
             setStatus("Refreshing…");
-            window.location.reload();
+            router.refresh();
+            setTimeout(() => setStatus(""), 900);
           }}
           className="gantt-linkmode-btn"
           title="Reload roadmap from server"
         >
-          Save & Refresh
+          Refresh
         </button>
         <div className="gantt-saved" aria-live="polite" title="Auto-save status">
           <span className="gantt-saved-dot" />
           {status
             ? status
             : lastSavedAt
-              ? `Auto-saved ${formatRelative(lastSavedAt, savedTick)}`
-              : "Changes auto-save as you edit"}
+              ? `Saved ${formatRelative(lastSavedAt, savedTick)}`
+              : "Auto-saves as you edit"}
         </div>
       </div>
 
       <div className="gantt-frame" ref={frameRef}>
-        <Theme>
-          <Gantt
-            tasks={initialTasks}
-            links={links}
-            scales={scales}
-            zoom={false}
-            columns={columns}
-            cellHeight={40}
-            scaleHeight={40}
-            cellWidth={zoom === "quarter" ? 80 : zoom === "month" ? 100 : 40}
-            cellBorders="full"
-            init={init}
-            taskTemplate={TaskTemplate}
-          />
-        </Theme>
+        {tasks.length === 0 && emptyState ? (
+          <div className="gantt-empty-overlay">{emptyState}</div>
+        ) : (
+          <Theme>
+            <Gantt
+              tasks={initialTasks}
+              links={links}
+              scales={scales}
+              zoom={false}
+              columns={columns}
+              cellHeight={36}
+              scaleHeight={36}
+              cellWidth={zoom === "quarter" ? 80 : zoom === "month" ? 100 : 40}
+              cellBorders="full"
+              init={init}
+              taskTemplate={TaskTemplate}
+            />
+          </Theme>
+        )}
       </div>
       {depEditorTaskId && (
         <div className="deps-modal-backdrop">

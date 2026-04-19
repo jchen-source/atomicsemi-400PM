@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 export default function ImportBacklogButton() {
+  const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string>("");
 
@@ -19,7 +21,7 @@ export default function ImportBacklogButton() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error ?? "Import failed");
       setStatus(`Imported ${data.imported} items.`);
-      window.location.reload();
+      router.refresh();
     } catch (e: unknown) {
       setStatus(e instanceof Error ? e.message : "Import failed");
     } finally {

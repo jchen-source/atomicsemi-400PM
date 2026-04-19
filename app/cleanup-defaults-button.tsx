@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 export default function CleanupDefaultsButton() {
+  const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
 
@@ -25,7 +27,7 @@ export default function CleanupDefaultsButton() {
       setMsg(
         `Deleted ${data.deletedTasks ?? 0} tasks and ${data.deletedDependencies ?? 0} dependencies.`,
       );
-      window.location.reload();
+      router.refresh();
     } catch (e: unknown) {
       setMsg(e instanceof Error ? e.message : "Cleanup failed");
     } finally {
@@ -38,9 +40,10 @@ export default function CleanupDefaultsButton() {
       <button
         onClick={onDeleteDemoOnly}
         disabled={busy}
-        className="inline-flex items-center rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-sm font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-60 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300"
+        title='Delete demo seed backlog "Launch PM App v1"'
+        className="inline-flex items-center rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
       >
-        {busy ? "Deleting..." : "Delete Demo Seed"}
+        {busy ? "Removing…" : "Remove demo seed"}
       </button>
       {msg ? <span className="text-xs text-muted-foreground">{msg}</span> : null}
     </div>

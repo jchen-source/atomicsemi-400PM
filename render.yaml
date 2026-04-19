@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: starter
     region: oregon
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci && node scripts/fix-svar-gantt.mjs && npx prisma generate && npx prisma db push && npx next build
     startCommand: npm start
     autoDeploy: true
     envVars:

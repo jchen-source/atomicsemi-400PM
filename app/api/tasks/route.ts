@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { CreateTaskSchema } from "@/lib/validation";
 import { parseTags, serializeTags } from "@/lib/utils";
@@ -39,7 +40,7 @@ export async function POST(req: Request) {
 
   const { parentId, linkedTaskId, ...rest } = data;
   const relationParentId = linkedTaskId ?? parentId;
-  const createData: Record<string, unknown> = {
+  const createData: Prisma.TaskCreateInput = {
     ...rest,
     tags: serializeTags(data.tags),
     parent: relationParentId ? { connect: { id: relationParentId } } : undefined,

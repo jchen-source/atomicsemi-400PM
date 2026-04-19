@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: pm-gantt
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pm-gantt-db
+          property: connectionString
+      - key: APP_PASSWORD
+        generateValue: true
+      - key: NOTION_TOKEN
+        sync: false
+      - key: NOTION_ROADMAP_DB_ID
+        sync: false
+      - key: NOTION_ISSUES_DB_ID
+        sync: false
+
+databases:
+  - name: pm-gantt-db
+    plan: starter
+    region: oregon
+    postgresMajorVersion: 16

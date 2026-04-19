@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+:root {
+  --background: 255 255 255;
+  --foreground: 33 37 56;
+  --muted: 246 247 251;
+  --muted-fg: 112 119 139;
+  --border: 231 234 242;
+  --primary: 90 95 223;
+  --primary-fg: 255 255 255;
+  --accent: 241 243 249;
+  --destructive: 228 74 87;
+}
+
+html,
+body {
+  background: #f5f7fb;
+  color: rgb(var(--foreground));
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* {
+  border-color: rgb(var(--border));
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+}
+
+.app-sidebar {
+  border-right: 1px solid rgb(var(--border));
+  background: #f8f9fc;
+  padding: 18px 14px;
+}
+
+.app-sidebar-card {
+  border: 1px solid rgb(var(--border));
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(31, 41, 55, 0.03);
+}
+
+.app-main {
+  min-width: 0;
+  padding: 20px 22px;
+}
+
+.app-topbar {
+  border: 1px solid rgb(var(--border));
+  border-radius: 14px;
+  background: #ffffff;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  box-shadow: 0 1px 2px rgba(31, 41, 55, 0.03);
+}
+
+.app-page-frame {
+  margin-top: 14px;
+  border: 1px solid rgb(var(--border));
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 18px;
+  box-shadow: 0 1px 2px rgba(31, 41, 55, 0.03);
+}
+
+@theme inline {
+  --color-background: rgb(var(--background));
+  --color-foreground: rgb(var(--foreground));
+  --color-muted: rgb(var(--muted));
+  --color-muted-foreground: rgb(var(--muted-fg));
+  --color-border: rgb(var(--border));
+  --color-primary: rgb(var(--primary));
+  --color-primary-foreground: rgb(var(--primary-fg));
+  --color-accent: rgb(var(--accent));
+  --color-destructive: rgb(var(--destructive));
+}

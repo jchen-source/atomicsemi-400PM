@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pm-gantt-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pm
+      POSTGRES_PASSWORD: pm
+      POSTGRES_DB: pm_gantt
+    ports:
+      - "5433:5432"
+    volumes:
+      - pm_gantt_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pm -d pm_gantt"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pm_gantt_pgdata:

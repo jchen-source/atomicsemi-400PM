@@ -1,0 +1,102 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// NOTE: SQLite doesn't support native enums or array columns. We use
+// validated string literals at the app boundary (see lib/validation.ts) and
+// JSON-serialize tag arrays via the `tags` field in `Task`.
+
+model Task {
+  id          String   @id @default(cuid())
+  notionId    String?  @unique
+  title       String
+  description String?
+  type        String   @default("TASK") // EPIC | TASK | ISSUE
+  status      String   @default("TODO") // TODO | IN_PROGRESS | BLOCKED | DONE
+  startDate   DateTime
+  endDate     DateTime
+  progress    Int      @default(0)
+
+  parentId String?
+  parent   Task?   @relation("Hier", fields: [parentId], references: [id], onDelete: SetNull)
+  children Task[]  @relation("Hier")
+  linkedTaskId String?
+  linkedTask   Task?  @relation("IssueLink", fields: [linkedTaskId], references: [id], onDelete: SetNull)
+  linkedIssues Task[] @relation("IssueLink")
+
+  dependsOn  Dependency[] @relation("Dependent")
+  dependedBy Dependency[] @relation("Predecessor")
+
+  assignee String?
+  resourceAllocated String?
+  effortHours Int?
+  tags     String  @default("[]") // JSON-encoded string[]
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  updates   TaskUpdate[]
+
+  @@index([parentId])
+  @@index([linkedTaskId])
+  @@index([type])
+  @@index([status])
+}
+
+model TaskUpdate {
+  id String @id @default(cuid())
+  taskId String
+  commentType String @default("PROGRESS") // PROGRESS | OPEN_ISSUE
+  comment String
+  progress Int?
+  endDate DateTime?
+  effortHours Int?
+  assignee String?
+  resourceAllocated String?
+  createdAt DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@index([createdAt])
+}
+
+model Dependency {
+  id            String @id @default(cuid())
+  predecessorId String
+  dependentId   String
+  type          String @default("FS") // FS | SS | FF | SF
+  lagDays       Int    @default(0)
+
+  predecessor Task @relation("Predecessor", fields: [predecessorId], references: [id], onDelete: Cascade)
+  dependent   Task @relation("Dependent", fields: [dependentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([predecessorId, dependentId])
+  @@index([predecessorId])
+  @@index([dependentId])
+}
+
+model SyncLog {
+  id       String   @id @default(cuid())
+  source   String   @default("notion")
+  runAt    DateTime @default(now())
+  imported Int      @default(0)
+  skipped  Int      @default(0)
+  failed   Int      @default(0)
+  errors   String?
+  message  String?
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}

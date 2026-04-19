@@ -129,12 +129,22 @@ export async function rollupProgress(
     let weightedSum = 0;
     let minStart = Number.POSITIVE_INFINITY;
     let maxEnd = Number.NEGATIVE_INFINITY;
+    // Effort hours roll up as a straight sum of every non-ISSUE child.
+    // `hasAnyEffort` lets us distinguish "all children blank" (leave the
+    // parent's manually-entered effort alone) from "at least one child has
+    // effort" (parent becomes the derived sum, even if some children are 0).
+    let effortSum = 0;
+    let hasAnyEffort = false;
     for (const s of spanSiblings) {
       const duration = Math.max(1, diffDaysUTC(s.startDate, s.endDate));
       totalWeight += duration;
       weightedSum += duration * s.progress;
       minStart = Math.min(minStart, s.startDate.getTime());
       maxEnd = Math.max(maxEnd, s.endDate.getTime());
+      if (s.effortHours != null) {
+        effortSum += s.effortHours;
+        hasAnyEffort = true;
+      }
     }
     const parentProgress =
       totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
@@ -144,6 +154,7 @@ export async function rollupProgress(
     const hasSpan = Number.isFinite(minStart) && Number.isFinite(maxEnd);
     const nextStart = hasSpan ? new Date(minStart) : node.startDate;
     const nextEnd = hasSpan ? new Date(maxEnd) : node.endDate;
+    const nextEffort = hasAnyEffort ? effortSum : node.effortHours;
 
     await tx.task.update({
       where: { id: node.parentId },
@@ -151,6 +162,7 @@ export async function rollupProgress(
         progress: parentProgress,
         startDate: nextStart,
         endDate: nextEnd,
+        effortHours: nextEffort,
       },
     });
     updated.add(node.parentId);

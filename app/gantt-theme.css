@@ -947,6 +947,32 @@
   font-weight: 600;
 }
 
+/* Rolled-up meta: parent rows whose value is auto-summed from children.
+   Shows a tiny sigma marker next to the number so users know the cell is
+   derived, not directly editable. */
+.grid-cell-meta--rollup {
+  color: rgb(51 65 85);
+}
+
+.grid-cell-meta--rollup.grid-cell-meta--empty {
+  color: rgb(100 116 139);
+  opacity: 0.6;
+}
+
+.grid-cell-rollup {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 9px;
+  line-height: 13px;
+  font-weight: 600;
+  color: rgb(37 99 235);
+  background: rgba(37, 99, 235, 0.08);
+  border-radius: 4px;
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Overdue flash: tasks whose end is in the past and are not yet complete.
    Applied to both the row (task name cell) and the Gantt bar so a glance
    across either pane surfaces what's slipping. */

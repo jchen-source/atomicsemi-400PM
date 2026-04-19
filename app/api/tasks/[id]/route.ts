@@ -74,6 +74,15 @@ export async function PATCH(req: Request, ctx: RouteCtx) {
   delete dbData.linkedTaskId;
 
   const { updatedTask, updatedIds } = await prisma.$transaction(async (tx) => {
+    // Effort hours on a parent are always a rollup sum of their children.
+    // Strip any manual edit to the parent's own value before writing so the
+    // canonical rollup (triggered below) isn't clobbered by the user's stale
+    // manual entry, and so the client sees its edit get reverted cleanly.
+    const childCount = await tx.task.count({ where: { parentId: id } });
+    if (childCount > 0 && "effortHours" in dbData) {
+      delete dbData.effortHours;
+    }
+
     const updatedTask =
       Object.keys(dbData).length > 0
         ? await tx.task.update({ where: { id }, data: dbData })
@@ -88,7 +97,8 @@ export async function PATCH(req: Request, ctx: RouteCtx) {
       taskPatch.progress !== undefined ||
       taskPatch.startDate !== undefined ||
       taskPatch.endDate !== undefined ||
-      taskPatch.parentId !== undefined;
+      taskPatch.parentId !== undefined ||
+      taskPatch.effortHours !== undefined;
     // Roll up ancestors for the edited task AND for every task that got
     // pushed downstream. This is what propagates a bar drag inside a
     // Subtask all the way up to its Task / Workstream / Program bars.

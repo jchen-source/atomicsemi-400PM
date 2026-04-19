@@ -261,6 +261,14 @@ export default function GanttClient({
     return map;
   }, [tasks]);
 
+  // Mirror of `childCountById` held in a ref so memoized cell components
+  // (EffortCell, DepsLabelCell, …) can read the current value without being
+  // invalidated every time a single row changes.
+  const childCountByIdRef = useRef(childCountById);
+  useEffect(() => {
+    childCountByIdRef.current = childCountById;
+  }, [childCountById]);
+
   // Depth of each task in the hierarchy, used to label rows as
   // Program / Workstream / Task / Subtask.
   const depthById = useMemo(() => {
@@ -450,18 +458,41 @@ export default function GanttClient({
 
   const EffortCell = useMemo(() => {
     function Cell({ row }: { row: Record<string, unknown> }) {
+      const rowId = String(row?.id ?? "");
+      const kids = childCountByIdRef.current.get(rowId) ?? 0;
+      const isParent = kids > 0;
       const raw = row?.effortHours;
-      if (raw == null || raw === "")
-        return <span className="grid-cell-meta grid-cell-meta--empty">—</span>;
+      if (raw == null || raw === "") {
+        return (
+          <span
+            className={
+              "grid-cell-meta grid-cell-meta--empty" +
+              (isParent ? " grid-cell-meta--rollup" : "")
+            }
+            title={
+              isParent
+                ? `Auto-summed from ${kids} child ${kids === 1 ? "task" : "tasks"} — add effort on children to populate.`
+                : "No estimate yet"
+            }
+          >
+            —
+          </span>
+        );
+      }
       const hrs = Math.max(0, Math.round(Number(raw)));
       const progress = Math.max(0, Math.min(100, Number(row?.progress ?? 0)));
       const remaining = Math.round(hrs * ((100 - progress) / 100));
+      const title = isParent
+        ? `Rolled up from ${kids} child ${kids === 1 ? "task" : "tasks"}: ${hrs}h total, ${remaining}h remaining at ${progress}% complete.`
+        : `${hrs}h total, ${remaining}h remaining at ${progress}% complete`;
       return (
         <span
-          className="grid-cell-meta"
-          title={`${hrs}h total, ${remaining}h remaining at ${progress}% complete`}
+          className={
+            "grid-cell-meta" + (isParent ? " grid-cell-meta--rollup" : "")
+          }
+          title={title}
         >
-          {remaining}h
+          {remaining}h{isParent ? <span className="grid-cell-rollup">Σ</span> : null}
         </span>
       );
     }
@@ -874,6 +905,28 @@ export default function GanttClient({
         if (nextStartMs !== undefined) payload.startDate = new Date(nextStartMs);
         if (nextEndMs !== undefined) payload.endDate = new Date(nextEndMs);
         if (rawEffort !== undefined) payload.effortHours = nextEffort;
+      }
+
+      // Parent rows derive effort from their children, so refuse any direct
+      // edit of effortHours on them. Revert the grid's optimistic value back
+      // to the rolled-up number so the user sees the rule without a round
+      // trip, and show a brief hint in the status bar.
+      const parentKidCount = childCountByIdRef.current.get(data.id) ?? 0;
+      if (parentKidCount > 0 && "effortHours" in payload) {
+        delete payload.effortHours;
+        if (prev) {
+          suppressUpdateIds.current.add(data.id);
+          apiRef.current?.exec("update-task", {
+            id: data.id,
+            task: { effortHours: prev.effortHours },
+            eventSource: "server-reschedule",
+          });
+          setTimeout(() => suppressUpdateIds.current.delete(data.id), 800);
+        }
+        setStatus(
+          `Estimated hours rolls up from ${parentKidCount} child ${parentKidCount === 1 ? "task" : "tasks"} — edit children instead.`,
+        );
+        setTimeout(() => setStatus(""), 2400);
       }
 
       if (Object.keys(payload).length === 0) return;

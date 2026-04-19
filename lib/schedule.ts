@@ -120,11 +120,16 @@ export async function rollupProgress(
       where: { parentId: node.parentId },
     });
 
+    // Only real work items (TASK / EPIC) define the parent's visible span.
+    // Linked ISSUEs render as their own top-level rows in the Gantt, so they
+    // must not inflate (or prevent shrinkage of) their anchor task's parent.
+    const spanSiblings = siblings.filter((s) => s.type !== "ISSUE");
+
     let totalWeight = 0;
     let weightedSum = 0;
     let minStart = Number.POSITIVE_INFINITY;
     let maxEnd = Number.NEGATIVE_INFINITY;
-    for (const s of siblings) {
+    for (const s of spanSiblings) {
       const duration = Math.max(1, diffDaysUTC(s.startDate, s.endDate));
       totalWeight += duration;
       weightedSum += duration * s.progress;
@@ -134,9 +139,11 @@ export async function rollupProgress(
     const parentProgress =
       totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
 
-    const nextStart =
-      Number.isFinite(minStart) ? new Date(minStart) : node.startDate;
-    const nextEnd = Number.isFinite(maxEnd) ? new Date(maxEnd) : node.endDate;
+    // When there are no non-issue children, don't clobber the parent's dates
+    // with garbage — just leave the existing span.
+    const hasSpan = Number.isFinite(minStart) && Number.isFinite(maxEnd);
+    const nextStart = hasSpan ? new Date(minStart) : node.startDate;
+    const nextEnd = hasSpan ? new Date(maxEnd) : node.endDate;
 
     await tx.task.update({
       where: { id: node.parentId },
@@ -169,6 +176,26 @@ export async function rollupFromParentId(
   });
   if (fakeLeaf?.id) return rollupProgress(tx, fakeLeaf.id);
   return new Set<string>();
+}
+
+/**
+ * Roll up ancestors for every id in `ids`. Useful when a batch of tasks was
+ * moved (e.g. downstream reschedule shifted 5 successors and each of their
+ * workstream/program parents needs its dates/progress recomputed).
+ */
+export async function rollupAncestorsForIds(
+  tx: PrismaTx,
+  ids: Iterable<string>,
+): Promise<Set<string>> {
+  const updated = new Set<string>();
+  const seenLeaves = new Set<string>();
+  for (const id of ids) {
+    if (seenLeaves.has(id)) continue;
+    seenLeaves.add(id);
+    const rolled = await rollupProgress(tx, id);
+    for (const r of rolled) updated.add(r);
+  }
+  return updated;
 }
 
 export type { Task, Dependency };

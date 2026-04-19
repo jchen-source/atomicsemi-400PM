@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { CreateDependencySchema } from "@/lib/validation";
-import { rescheduleDownstream } from "@/lib/schedule";
+import {
+  rescheduleDownstream,
+  rollupAncestorsForIds,
+} from "@/lib/schedule";
 
 export async function GET() {
   const deps = await prisma.dependency.findMany();
@@ -72,8 +75,18 @@ export async function POST(req: Request) {
     const { dep, affected } = await prisma.$transaction(async (tx) => {
       const dep = await tx.dependency.create({ data });
       const touched = await rescheduleDownstream(tx, data.predecessorId);
+      // After downstream shifts, every affected task's Workstream/Program
+      // parent needs to recompute span + progress. Seed with the predecessor
+      // too, in case the dependency anchors a still-unshifted task whose
+      // ancestor chain hasn't been touched yet.
+      const rolled = await rollupAncestorsForIds(tx, [
+        data.predecessorId,
+        data.dependentId,
+        ...touched,
+      ]);
+      const allTouched = new Set<string>([...touched, ...rolled]);
       const affected = await tx.task.findMany({
-        where: { id: { in: [...touched] } },
+        where: { id: { in: [...allTouched] } },
       });
       return { dep, affected };
     });

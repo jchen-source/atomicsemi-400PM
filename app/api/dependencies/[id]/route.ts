@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { UpdateDependencySchema } from "@/lib/validation";
-import { rescheduleDownstream } from "@/lib/schedule";
+import {
+  rescheduleDownstream,
+  rollupAncestorsForIds,
+} from "@/lib/schedule";
 
 type RouteCtx = { params: Promise<{ id: string }> };
 
@@ -32,8 +35,14 @@ export async function PATCH(req: Request, ctx: RouteCtx) {
       data: parsed.data,
     });
     const touched = await rescheduleDownstream(tx, existing.predecessorId);
+    const rolled = await rollupAncestorsForIds(tx, [
+      existing.predecessorId,
+      existing.dependentId,
+      ...touched,
+    ]);
+    const allTouched = new Set<string>([...touched, ...rolled]);
     const affected = await tx.task.findMany({
-      where: { id: { in: [...touched] } },
+      where: { id: { in: [...allTouched] } },
     });
     return { dep, affected };
   });

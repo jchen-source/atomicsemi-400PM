@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { z } from "zod";
+import {
+  rescheduleDownstream,
+  rollupAncestorsForIds,
+} from "@/lib/schedule";
 
 type RouteCtx = { params: Promise<{ id: string }> };
 
@@ -68,6 +72,17 @@ export async function PUT(req: Request, ctx: RouteCtx) {
         data: { predecessorId, dependentId, type: "FS", lagDays: 0 },
       });
     }
+
+    // Re-run scheduling from every touched predecessor so the dependent and
+    // any further downstream tasks get pushed forward as needed, then roll
+    // up ancestor Workstream/Program dates for the dependent and anyone
+    // shifted along the way.
+    const touched = new Set<string>();
+    for (const pid of [...nextSet]) {
+      const shifted = await rescheduleDownstream(tx, pid);
+      for (const s of shifted) touched.add(s);
+    }
+    await rollupAncestorsForIds(tx, [dependentId, ...touched]);
   });
 
   const final = await prisma.dependency.findMany({

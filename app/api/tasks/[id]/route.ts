@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { UpdateTaskSchema } from "@/lib/validation";
 import {
   rescheduleDownstream,
+  rollupAncestorsForIds,
   rollupFromParentId,
   rollupProgress,
 } from "@/lib/schedule";
@@ -88,7 +89,12 @@ export async function PATCH(req: Request, ctx: RouteCtx) {
       taskPatch.startDate !== undefined ||
       taskPatch.endDate !== undefined ||
       taskPatch.parentId !== undefined;
-    const rolled = shouldRollup ? await rollupProgress(tx, id) : new Set<string>();
+    // Roll up ancestors for the edited task AND for every task that got
+    // pushed downstream. This is what propagates a bar drag inside a
+    // Subtask all the way up to its Task / Workstream / Program bars.
+    const rolled = shouldRollup
+      ? await rollupAncestorsForIds(tx, [id, ...rescheduled])
+      : new Set<string>();
 
     const comments: Array<{ type: "PROGRESS" | "OPEN_ISSUE"; text: string }> = [];
     if (progressComment && progressComment.trim()) {
@@ -144,14 +150,47 @@ export async function PATCH(req: Request, ctx: RouteCtx) {
   });
 }
 
-export async function DELETE(_req: Request, ctx: RouteCtx) {
+export async function DELETE(req: Request, ctx: RouteCtx) {
   const { id } = await ctx.params;
+  const url = new URL(req.url);
+  // mode:
+  //   "cascade"     -> delete task and all descendants (default)
+  //   "parent-only" -> detach direct children (promote to top level), then delete this task only
+  const mode = (url.searchParams.get("mode") ?? "cascade") as
+    | "cascade"
+    | "parent-only";
+
   try {
     const victim = await prisma.task.findUnique({
       where: { id },
       select: { parentId: true },
     });
 
+    if (mode === "parent-only") {
+      const result = await prisma.$transaction(async (tx) => {
+        // Promote direct children to top-level.
+        await tx.task.updateMany({
+          where: { parentId: id },
+          data: { parentId: null },
+        });
+        await tx.dependency.deleteMany({
+          where: {
+            OR: [{ predecessorId: id }, { dependentId: id }],
+          },
+        });
+        await tx.task.delete({ where: { id } });
+        const rolled = await rollupFromParentId(tx, victim?.parentId);
+        return { deletedTasks: 1, rolled: [...rolled] };
+      });
+      return NextResponse.json({
+        ok: true,
+        mode,
+        deletedTasks: result.deletedTasks,
+        affected: result.rolled,
+      });
+    }
+
+    // Default cascade: gather descendants and delete all.
     const allIds = new Set<string>([id]);
     const queue = [id];
     while (queue.length) {
@@ -180,6 +219,7 @@ export async function DELETE(_req: Request, ctx: RouteCtx) {
     });
     return NextResponse.json({
       ok: true,
+      mode,
       deletedTasks: result.deleted,
       affected: result.rolled,
     });

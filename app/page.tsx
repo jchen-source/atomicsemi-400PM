@@ -132,13 +132,16 @@ export default async function GanttPage() {
           depsCount: (incomingDepsByTask.get(t.id) ?? []).length,
           progress: t.progress,
           urgency: urgencyFromTags(parseTags(t.tags)),
+          effortHours: t.effortHours ?? null,
+          assignee: t.assignee ?? null,
+          resourceAllocated: t.resourceAllocated ?? null,
           parent: t.type === "ISSUE" ? null : t.parentId,
           open: t.type === "ISSUE" ? undefined : (childCountByParent.get(t.id) ?? 0) > 0,
           type:
-            t.type === "EPIC"
-              ? "summary"
-              : t.type === "ISSUE"
-                ? "task"
+            t.type === "ISSUE"
+              ? "task"
+              : (childCountByParent.get(t.id) ?? 0) > 0 || t.type === "EPIC"
+                ? "summary"
                 : "task",
           rowType: (t.type === "EPIC" || t.type === "ISSUE" ? t.type : "TASK") as
             | "EPIC"
@@ -158,8 +161,11 @@ export default async function GanttPage() {
                 Your roadmap is empty
               </p>
               <p className="roadmap-empty-body">
-                Add a task to start planning, or pull your existing programs in
-                from the committed Notion backlog.
+                Click <strong>+ Create task</strong> to add one. Drag any task
+                onto another to nest it — the hierarchy goes{" "}
+                <strong>Program → Workstream → Task → Subtask</strong>, and
+                each container rolls up dates and progress from everything
+                nested below it.
               </p>
               <div className="roadmap-empty-actions">
                 <ImportBacklogButton />

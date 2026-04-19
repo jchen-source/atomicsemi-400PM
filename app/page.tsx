@@ -2,6 +2,7 @@ import Link from "next/link";
 import { prisma } from "@/lib/db";
 import GanttClient from "./gantt-client";
 import CleanupDefaultsButton from "./cleanup-defaults-button";
+import ImportBacklogButton from "./import-backlog-button";
 import { parseTags } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -89,12 +90,15 @@ export default async function GanttPage() {
                 edits are never overwritten.
               </p>
             </div>
-            <Link
-              href="/settings#notion"
-              className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"
-            >
-              Connect Notion
-            </Link>
+            <div className="flex flex-wrap items-center gap-2">
+              <ImportBacklogButton />
+              <Link
+                href="/settings#notion"
+                className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"
+              >
+                Connect Notion
+              </Link>
+            </div>
           </div>
         </div>
       )}

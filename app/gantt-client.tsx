@@ -146,6 +146,19 @@ export default function GanttClient({
   const [depEditorQuery, setDepEditorQuery] = useState("");
   const [depEditorSelected, setDepEditorSelected] = useState<string[]>([]);
   const [depEditorSaving, setDepEditorSaving] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const [addingTask, setAddingTask] = useState(false);
+  const [savedTick, setSavedTick] = useState(0);
+
+  // Refresh "last saved" label every 15s so the relative time stays accurate.
+  useEffect(() => {
+    const t = setInterval(() => setSavedTick((v) => v + 1), 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  function markSaved() {
+    setLastSavedAt(Date.now());
+  }
 
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
@@ -502,6 +515,7 @@ export default function GanttClient({
                 : Number(nextEndMs ?? prevState?.endMs ?? Date.now()),
           });
           applyAffected(affected);
+          markSaved();
           setStatus("Saved");
           setTimeout(() => setStatus(""), 1000);
         })
@@ -550,6 +564,7 @@ export default function GanttClient({
           setStatus(
             data?.existed ? "Dependency already exists." : "Dependency created.",
           );
+          if (!data?.existed) markSaved();
           setTimeout(() => setStatus(""), 900);
         })
         .catch((e: unknown) => {
@@ -581,6 +596,39 @@ export default function GanttClient({
   }
 
   const Theme = dark ? WillowDark : Willow;
+
+  async function createTopLevelTask() {
+    if (addingTask) return;
+    setAddingTask(true);
+    setStatus("Creating task…");
+    const start = new Date();
+    const end = new Date(start.getTime() + 1000 * 60 * 60 * 24 * 7);
+    try {
+      const res = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "New Task",
+          description: "",
+          type: "TASK",
+          status: "TODO",
+          startDate: start,
+          endDate: end,
+          progress: 0,
+          sortOrder: 9999,
+          tags: [],
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      markSaved();
+      setStatus("Task added.");
+      window.location.reload();
+    } catch (e: unknown) {
+      setStatus(e instanceof Error ? e.message : "Add task failed");
+    } finally {
+      setAddingTask(false);
+    }
+  }
 
   async function addChildTaskFor(parentId: string) {
     const parent = tasks.find((t) => t.id === parentId);
@@ -741,15 +789,39 @@ export default function GanttClient({
         </div>
         <button
           type="button"
+          onClick={createTopLevelTask}
+          className="gantt-linkmode-btn is-active"
+          title="Create a new top-level task"
+          disabled={addingTask}
+        >
+          {addingTask ? "Adding…" : "+ New Task"}
+        </button>
+        <button
+          type="button"
           onClick={autoChainDependencies}
           className="gantt-linkmode-btn"
           title="Create sequential dependencies with one click"
         >
           Auto Dependencies
         </button>
-        <div className="gantt-status" aria-live="polite">
-          {status ||
-            "Draw dependency: drag from the circle handle on one bar to another bar"}
+        <button
+          type="button"
+          onClick={() => {
+            setStatus("Refreshing…");
+            window.location.reload();
+          }}
+          className="gantt-linkmode-btn"
+          title="Reload roadmap from server"
+        >
+          Save & Refresh
+        </button>
+        <div className="gantt-saved" aria-live="polite" title="Auto-save status">
+          <span className="gantt-saved-dot" />
+          {status
+            ? status
+            : lastSavedAt
+              ? `Auto-saved ${formatRelative(lastSavedAt, savedTick)}`
+              : "Changes auto-save as you edit"}
         </div>
       </div>
 
@@ -839,4 +911,18 @@ function shortDate(d: Date) {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
+}
+
+function formatRelative(ts: number, _tick: number): string {
+  void _tick;
+  const diffMs = Date.now() - ts;
+  const sec = Math.max(0, Math.round(diffMs / 1000));
+  if (sec < 5) return "just now";
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const d = new Date(ts);
+  return d.toLocaleString();
 }

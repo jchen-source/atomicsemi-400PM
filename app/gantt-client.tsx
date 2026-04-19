@@ -68,10 +68,11 @@ function escapeHtml(v: string) {
     .replaceAll("'", "&#39;");
 }
 
-type GanttTaskRuntime = Omit<GanttTaskInput, "start" | "end"> & {
+type GanttTaskRuntime = Omit<GanttTaskInput, "start" | "end" | "parent"> & {
   start: Date;
   end: Date;
   duration: number;
+  parent?: string;
 };
 
 type ZoomLevel = "day" | "week" | "month" | "quarter";
@@ -161,6 +162,7 @@ export default function GanttClient({
         const e = new Date(t.end);
         return {
           ...t,
+          parent: t.parent ?? undefined,
           start: s,
           end: e,
           duration: daysBetween(s, e),

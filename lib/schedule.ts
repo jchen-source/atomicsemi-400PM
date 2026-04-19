@@ -70,7 +70,7 @@ export async function rescheduleDownstream(
       const pred = edge.predecessor;
       const dep = edge.dependent;
       const { start: minStart, end: minEnd } = applyDependency(
-        edge.type,
+        edge.type as DepType,
         edge.lagDays,
         pred.startDate,
         pred.endDate,

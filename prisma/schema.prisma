@@ -2,8 +2,10 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// Local dev uses SQLite (DATABASE_URL=file:./dev.db). On Render we swap
+// this to `postgresql` at build time via scripts/prepare-postgres-schema.mjs.
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 

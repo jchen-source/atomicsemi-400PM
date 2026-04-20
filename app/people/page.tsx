@@ -12,10 +12,13 @@ export default async function PeoplePage() {
   await ensurePersonTable();
   const count = await prisma.person.count();
   if (count === 0) {
-    await prisma.person.createMany({
-      data: DEFAULT_PEOPLE.map((name) => ({ name })),
-      skipDuplicates: true,
-    });
+    for (const name of DEFAULT_PEOPLE) {
+      try {
+        await prisma.person.create({ data: { name } });
+      } catch {
+        /* unique collision or concurrent seed */
+      }
+    }
   }
 
   const [people, tasks] = await Promise.all([

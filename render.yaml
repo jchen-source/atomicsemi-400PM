@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: starter
     region: oregon
-    buildCommand: npm ci --ignore-scripts && node scripts/fix-svar-gantt.mjs && npx prisma generate && npx prisma db push && npx next build
+    buildCommand: npm ci --ignore-scripts && node scripts/fix-svar-gantt.mjs && node scripts/prepare-postgres-schema.mjs && npx prisma generate && npx prisma db push && npx next build
     startCommand: npm start
     autoDeploy: true
     envVars:

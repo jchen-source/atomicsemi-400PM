@@ -31,10 +31,17 @@ export async function GET() {
   await ensurePersonTable();
   const count = await prisma.person.count();
   if (count === 0) {
-    await prisma.person.createMany({
-      data: DEFAULT_PEOPLE.map((name) => ({ name })),
-      skipDuplicates: true,
-    });
+    // Loop because SQLite's Prisma adapter doesn't support
+    // `createMany({ skipDuplicates: true })`. A per-row try/catch keeps this
+    // idempotent regardless of dialect.
+    for (const name of DEFAULT_PEOPLE) {
+      try {
+        await prisma.person.create({ data: { name } });
+      } catch {
+        // Unique-name collision is fine; anything else we also swallow here
+        // so seeding never blocks the page.
+      }
+    }
   }
 
   const people = await prisma.person.findMany({

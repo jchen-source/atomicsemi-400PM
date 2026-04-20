@@ -269,6 +269,15 @@ export default function GanttClient({
     childCountByIdRef.current = childCountById;
   }, [childCountById]);
 
+  // Same trick for depth. Previously TaskNameCell closed over `depthById`
+  // directly which meant every task change re-created the cell component,
+  // which re-created the `columns` array, which forced SVAR to fully
+  // re-initialize the grid. That re-init occasionally rendered in a broken
+  // state with only the first 3 columns (Task/Start/End) visible — a ref
+  // mirror lets the cell read current depths without triggering any of
+  // that churn.
+  const depthByIdRef = useRef<Map<string, number>>(new Map());
+
   // Depth of each task in the hierarchy, used to label rows as
   // Program / Workstream / Task / Subtask.
   const depthById = useMemo(() => {
@@ -293,6 +302,10 @@ export default function GanttClient({
     for (const t of tasks) resolve(t.id, new Set());
     return depths;
   }, [tasks]);
+
+  useEffect(() => {
+    depthByIdRef.current = depthById;
+  }, [depthById]);
 
 
   const TaskTemplate = ({
@@ -569,8 +582,11 @@ export default function GanttClient({
       const id = String(row?.id ?? "");
       const text = String(row?.text ?? "");
       const rowType = String(row?.rowType ?? "TASK");
-      const depth = depthById.get(id) ?? 0;
-      const childCount = childCountById.get(id) ?? 0;
+      // Read hierarchy data from refs rather than closed-over maps so this
+      // component stays referentially stable and doesn't force the whole
+      // `columns` array to recreate on every task change.
+      const depth = depthByIdRef.current.get(id) ?? 0;
+      const childCount = childCountByIdRef.current.get(id) ?? 0;
       const level = levelForRow(rowType, depth, childCount);
       const overdue = row?.end
         ? isOverdue(new Date(String(row.end)), Number(row?.progress ?? 0))
@@ -677,7 +693,14 @@ export default function GanttClient({
     }
     Cell.displayName = "TaskNameCell";
     return Cell;
-  }, [childCountById, depthById]);
+    // Empty deps on purpose: the cell reads hierarchy data via refs
+    // (childCountByIdRef / depthByIdRef), so it never needs to be
+    // re-created. Keeping this cell stable keeps the `columns` array
+    // stable, which keeps SVAR from fully re-initializing the grid on
+    // every task change — the root cause of the "only 3 columns render"
+    // layout bug.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const columns = useMemo(
     () => [

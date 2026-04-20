@@ -19,6 +19,11 @@ import {
   type BurndownSnapshotInput,
   type BurndownTaskInput,
 } from "../burndown-chart";
+import {
+  OwnerPicker,
+  initialsOf,
+  type PersonOption,
+} from "../tasks-client";
 
 /**
  * Workstream standup client.
@@ -108,6 +113,7 @@ type Props = {
   burnSnapshots: BurndownSnapshotInput[];
   displaySnapshots: WorkstreamSnapshot[];
   nowISO: string;
+  people: PersonOption[];
 };
 
 export default function WorkstreamClient({
@@ -117,6 +123,7 @@ export default function WorkstreamClient({
   burnSnapshots: initialBurnSnapshots,
   displaySnapshots: initialDisplay,
   nowISO,
+  people,
 }: Props) {
   // Everything is client-owned from here so saves stay optimistic.
   const [cards, setCards] = useState<ChildCard[]>(initialCards);
@@ -252,6 +259,19 @@ export default function WorkstreamClient({
       },
     ]);
     setHistory((prev) => [newSnapshot, ...prev]);
+  };
+
+  // Owner change: card's chip popover PATCHes assignee. No rollup / chart
+  // changes to mirror — just keep `cards` in sync so the card's own chip
+  // re-renders with the new value on next re-render. Extracted out of
+  // onSaved because it has no snapshot and doesn't affect burndown state.
+  const onOwnerChanged = (cardId: string, assignee: string | null) => {
+    setCards((prev) =>
+      prev.map((c) => (c.id === cardId ? { ...c, assignee } : c)),
+    );
+    if (header.id === cardId) {
+      setHeaderState((prev) => ({ ...prev, assignee }));
+    }
   };
 
   // Reschedule: PATCH the task with new start/end dates. Used by the
@@ -390,7 +410,9 @@ export default function WorkstreamClient({
                 burnTasks={burnTasks}
                 burnSnapshots={burnSnapshots}
                 nowMs={nowMs}
+                people={people}
                 onSaved={onSaved}
+                onOwnerChanged={onOwnerChanged}
                 onRescheduled={onRescheduled}
                 onIssueFiled={onIssueFiled}
                 onIssueResolved={onIssueResolved}
@@ -411,7 +433,9 @@ function TaskCard({
   burnTasks,
   burnSnapshots,
   nowMs,
+  people,
   onSaved,
+  onOwnerChanged,
   onRescheduled,
   onIssueFiled,
   onIssueResolved,
@@ -421,6 +445,8 @@ function TaskCard({
   burnTasks: BurndownTaskInput[];
   burnSnapshots: BurndownSnapshotInput[];
   nowMs: number;
+  people: PersonOption[];
+  onOwnerChanged: (cardId: string, assignee: string | null) => void;
   onSaved: (
     cardId: string,
     affected: Array<{
@@ -490,6 +516,11 @@ function TaskCard({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Owner chip is now a popover trigger. Optimistically update so the chip
+  // flips immediately; the PATCH below syncs the server + triggers rollup.
+  const [assignee, setAssignee] = useState<string | null>(card.assignee);
+  const [ownerOpen, setOwnerOpen] = useState(false);
+  const [ownerSaving, setOwnerSaving] = useState(false);
 
   // Reset form fields when card prop changes (e.g. after save affects them).
   useMemo(() => {
@@ -512,12 +543,14 @@ function TaskCard({
     setRemainingDirty(false);
     setStatusValue(card.status);
     setBlocked(card.blocked);
+    setAssignee(card.assignee);
   }, [
     card.progress,
     card.remainingEffort,
     card.effortHours,
     card.status,
     card.blocked,
+    card.assignee,
   ]);
 
   // Derived value shown whenever the user hasn't manually overridden
@@ -533,6 +566,37 @@ function TaskCard({
   const effectiveRemaining: number | "" = remainingDirty
     ? remaining
     : derivedRemaining ?? "";
+
+  async function saveOwner(name: string | null) {
+    const next = name && name.trim() ? name.trim() : null;
+    if ((assignee ?? null) === next) {
+      setOwnerOpen(false);
+      return;
+    }
+    setOwnerSaving(true);
+    setError(null);
+    setAssignee(next);
+    try {
+      const res = await fetch(`/api/tasks/${card.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ assignee: next }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      onOwnerChanged(card.id, next);
+      setOwnerOpen(false);
+    } catch (e) {
+      setAssignee(card.assignee);
+      setError(e instanceof Error ? e.message : "Failed to update owner");
+    } finally {
+      setOwnerSaving(false);
+    }
+  }
 
   async function save() {
     setSaving(true);
@@ -648,15 +712,11 @@ function TaskCard({
   const hasSlippingIssue = slippingIssues.length > 0;
   // Ownership lookup for the avatar chip. The server stores `assignee`
   // as a free-form string; we derive initials so even Notion imports
-  // without a matching Person row still render a prominent chip.
-  const ownerName = (card.assignee ?? "").trim();
-  const ownerInitials = ownerName
-    ? ownerName
-        .split(/\s+/)
-        .slice(0, 2)
-        .map((s) => s.charAt(0).toUpperCase())
-        .join("") || "?"
-    : null;
+  // without a matching Person row still render a prominent chip. We read
+  // from the local `assignee` state (not card.assignee directly) so the
+  // chip updates instantly on save, even before the parent re-renders.
+  const ownerName = (assignee ?? "").trim();
+  const ownerInitials = ownerName ? initialsOf(ownerName) : null;
 
   const cardClass = [
     "ws-card",
@@ -679,24 +739,44 @@ function TaskCard({
                 card.title
               )}
             </h3>
-            {ownerInitials ? (
-              <span className="ws-owner-chip" title={`Owner: ${ownerName}`}>
-                <span className="ws-owner-chip__avatar" aria-hidden>
-                  {ownerInitials}
-                </span>
-                <span className="ws-owner-chip__name">{ownerName}</span>
-              </span>
-            ) : (
-              <span
-                className="ws-owner-chip ws-owner-chip--empty"
-                title="No owner assigned"
+            <span className="ws-owner-wrap">
+              <button
+                type="button"
+                className={
+                  "ws-owner-chip" +
+                  (ownerInitials ? "" : " ws-owner-chip--empty")
+                }
+                onClick={() => setOwnerOpen((v) => !v)}
+                disabled={ownerSaving}
+                title={
+                  ownerInitials
+                    ? `Owner: ${ownerName} — click to reassign`
+                    : "Assign an owner"
+                }
               >
                 <span className="ws-owner-chip__avatar" aria-hidden>
-                  ?
+                  {ownerInitials ?? "?"}
                 </span>
-                <span className="ws-owner-chip__name">Unassigned</span>
-              </span>
-            )}
+                <span className="ws-owner-chip__name">
+                  {ownerSaving
+                    ? "Saving…"
+                    : ownerInitials
+                      ? ownerName
+                      : "Unassigned"}
+                </span>
+                <span className="ws-owner-chip__chev" aria-hidden>
+                  ▾
+                </span>
+              </button>
+              {ownerOpen && (
+                <OwnerPicker
+                  people={people}
+                  currentAssignee={assignee}
+                  onSelect={(name) => void saveOwner(name)}
+                  onClose={() => setOwnerOpen(false)}
+                />
+              )}
+            </span>
           </div>
           <div className="ws-card-submeta">
             <span>

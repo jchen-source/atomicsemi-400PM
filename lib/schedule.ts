@@ -133,8 +133,15 @@ export async function rollupProgress(
     // `hasAnyEffort` lets us distinguish "all children blank" (leave the
     // parent's manually-entered effort alone) from "at least one child has
     // effort" (parent becomes the derived sum, even if some children are 0).
+    //
+    // `remainingEffort` follows the same rule on its own column so the
+    // "Remaining (h)" cell on parent rows stays in sync with the standup
+    // updates pushed on leaves. Without this the parent row on /tasks
+    // holds a stale value forever.
     let effortSum = 0;
     let hasAnyEffort = false;
+    let remainingSum = 0;
+    let hasAnyRemaining = false;
     for (const s of spanSiblings) {
       const duration = Math.max(1, diffDaysUTC(s.startDate, s.endDate));
       totalWeight += duration;
@@ -144,6 +151,10 @@ export async function rollupProgress(
       if (s.effortHours != null) {
         effortSum += s.effortHours;
         hasAnyEffort = true;
+      }
+      if (s.remainingEffort != null) {
+        remainingSum += s.remainingEffort;
+        hasAnyRemaining = true;
       }
     }
     const parentProgress =
@@ -155,6 +166,7 @@ export async function rollupProgress(
     const nextStart = hasSpan ? new Date(minStart) : node.startDate;
     const nextEnd = hasSpan ? new Date(maxEnd) : node.endDate;
     const nextEffort = hasAnyEffort ? effortSum : node.effortHours;
+    const nextRemaining = hasAnyRemaining ? remainingSum : node.remainingEffort;
 
     await tx.task.update({
       where: { id: node.parentId },
@@ -163,6 +175,7 @@ export async function rollupProgress(
         startDate: nextStart,
         endDate: nextEnd,
         effortHours: nextEffort,
+        remainingEffort: nextRemaining,
       },
     });
     updated.add(node.parentId);

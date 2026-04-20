@@ -3,11 +3,16 @@ import { prisma } from "@/lib/db";
 import { parseTags } from "@/lib/utils";
 import { computeHealth, expectedProgressAt } from "@/lib/health";
 import { effectivePriority, type TaskLike } from "@/lib/filters";
+import { ensurePersonTable } from "@/lib/person-bootstrap";
 import type {
   BurndownSnapshotInput,
   BurndownTaskInput,
 } from "./burndown-chart";
-import TasksClient, { type TaskRow, type TaskSnapshot } from "./tasks-client";
+import TasksClient, {
+  type TaskRow,
+  type TaskSnapshot,
+  type PersonOption,
+} from "./tasks-client";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +24,11 @@ export const dynamic = "force-dynamic";
  * /api/tasks/[id]/progress. Burndown reads those snapshots back.
  */
 export default async function TasksPage() {
-  const [rawTasks, deps, allSnapshots] = await Promise.all([
+  // Bootstrap the Person table before the concurrent query — otherwise on a
+  // fresh SQLite install the `person.findMany` below fires before the table
+  // exists and the whole page errors out.
+  await ensurePersonTable();
+  const [rawTasks, deps, allSnapshots, rawPeople] = await Promise.all([
     prisma.task.findMany({
       orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
     }),
@@ -38,6 +47,10 @@ export default async function TasksPage() {
         health: true,
         comment: true,
       },
+    }),
+    prisma.person.findMany({
+      orderBy: [{ active: "desc" }, { name: "asc" }],
+      select: { id: true, name: true, role: true, active: true },
     }),
   ]);
 
@@ -271,9 +284,48 @@ export default async function TasksPage() {
         burnTasks={burnTasks}
         burnSnapshots={burnSnapshots}
         nowISO={now.toISOString()}
+        // Roster for the drawer's owner picker. Merges the Person table (for
+        // real contributors managed via /people) with any free-form assignee
+        // string found on existing tasks, so legacy Notion imports still
+        // surface their original owner as a suggestion.
+        people={buildPeopleOptions(rawPeople, rawTasks)}
       />
     </div>
   );
+}
+
+function buildPeopleOptions(
+  people: Array<{ id: string; name: string; role: string | null; active: boolean }>,
+  tasks: Array<{ assignee: string | null }>,
+): PersonOption[] {
+  const byName = new Map<string, PersonOption>();
+  for (const p of people) {
+    byName.set(p.name, {
+      id: p.id,
+      name: p.name,
+      role: p.role,
+      active: p.active,
+      source: "roster",
+    });
+  }
+  // Fold in freeform assignees from existing tasks so the picker can
+  // autocomplete even when the Person table hasn't caught up yet.
+  for (const t of tasks) {
+    const raw = (t.assignee ?? "").trim();
+    if (!raw) continue;
+    if (byName.has(raw)) continue;
+    byName.set(raw, {
+      id: `freeform:${raw}`,
+      name: raw,
+      role: null,
+      active: true,
+      source: "freeform",
+    });
+  }
+  return [...byName.values()].sort((a, b) => {
+    if (a.active !== b.active) return a.active ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
 }
 
 function deriveRowType(

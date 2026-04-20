@@ -59,6 +59,18 @@ export type TaskSnapshot = {
   health: string | null;
 };
 
+export type PersonOption = {
+  id: string;
+  name: string;
+  role: string | null;
+  active: boolean;
+  // "roster" = comes from the Person table and /people manages it.
+  // "freeform" = only exists as a string on a task's assignee field.
+  // The picker treats both as selectable, but tags roster entries with a
+  // subtle badge so the team knows which are "real" people vs. imported names.
+  source: "roster" | "freeform";
+};
+
 type FilterRow = Omit<TaskLike, "startDate" | "endDate" | "lastProgressAt"> & {
   startDate: string;
   endDate: string;
@@ -73,6 +85,7 @@ type Props = {
   burnTasks: BurndownTaskInput[];
   burnSnapshots: BurndownSnapshotInput[];
   nowISO: string;
+  people: PersonOption[];
 };
 
 const STATUS_OPTIONS = ["TODO", "IN_PROGRESS", "BLOCKED", "DONE"] as const;
@@ -84,6 +97,7 @@ export default function TasksClient({
   burnTasks: initialBurnTasks,
   burnSnapshots: initialBurnSnapshots,
   nowISO,
+  people,
 }: Props) {
   const router = useRouter();
   const [rows, setRows] = useState<TaskRow[]>(initialRows);
@@ -357,6 +371,10 @@ export default function TasksClient({
               hit.priority !== undefined
                 ? (hit.priority as FilterRow["priority"])
                 : r.priority,
+            assignee:
+              hit.assignee !== undefined
+                ? (hit.assignee as string | null)
+                : r.assignee,
           } as FilterRow;
         }),
       );
@@ -471,6 +489,7 @@ export default function TasksClient({
             snapshots={snapshots}
             loadingSnapshots={loadingSnapshots}
             series={drawerSeries}
+            people={people}
             onClose={() => setActiveId(null)}
             onSaved={({ affected, newSnapshot }) => {
               patchRowLocally(
@@ -904,6 +923,7 @@ function UpdateDrawer({
   snapshots,
   loadingSnapshots,
   series,
+  people,
   onClose,
   onSaved,
 }: {
@@ -911,6 +931,7 @@ function UpdateDrawer({
   snapshots: TaskSnapshot[];
   loadingSnapshots: boolean;
   series: import("./burndown-chart").Series | null;
+  people: PersonOption[];
   onClose: () => void;
   onSaved: (r: {
     affected: Array<
@@ -930,8 +951,21 @@ function UpdateDrawer({
   const [status, setStatus] = useState(row.status);
   const [blocked, setBlocked] = useState(row.blocked);
   const [priority, setPriority] = useState<TaskRow["priority"]>(row.priority);
+  const [assignee, setAssignee] = useState<string | null>(row.assignee);
+  const [ownerOpen, setOwnerOpen] = useState(false);
+  const [ownerSaving, setOwnerSaving] = useState(false);
+  const [estimate, setEstimate] = useState<number | "">(
+    row.effortHours ?? "",
+  );
   const [remainingEffort, setRemainingEffort] = useState<number | "">(
     row.remainingEffort ?? "",
+  );
+  // Track whether the user has manually edited Remaining. If they haven't,
+  // Remaining auto-derives from estimate × (1 − progress%) as they move the
+  // slider — same UX as the workstream standup form, kept in sync on every
+  // keystroke so what the burndown shows matches what's posted.
+  const [remainingDirty, setRemainingDirty] = useState<boolean>(
+    row.remainingEffort !== null && row.remainingEffort !== undefined,
   );
   const [nextStep, setNextStep] = useState(row.nextStep ?? "");
   const [comment, setComment] = useState("");
@@ -951,6 +985,61 @@ function UpdateDrawer({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Auto-derived remaining = estimate × (1 − progress/100). Only computed
+  // when the user hasn't overridden it manually; this mirrors the standup
+  // form on /tasks/[id] so the two surfaces agree on what "Remaining" means.
+  const derivedRemaining =
+    estimate !== "" && Number(estimate) > 0
+      ? Math.max(
+          0,
+          Math.round(Number(estimate) * (1 - progress / 100)),
+        )
+      : null;
+  const effectiveRemaining = remainingDirty
+    ? remainingEffort
+    : (derivedRemaining ?? remainingEffort);
+
+  // Owner change is a dedicated PATCH so parents can be reassigned too
+  // (the progress route is leaf-only and would 409). Optimistic locally so
+  // the chip flips immediately, then we let the parent patch the row state
+  // via onSaved so the row list + burnTasks stay consistent.
+  async function saveOwner(name: string | null) {
+    const next = name && name.trim() ? name.trim() : null;
+    if ((assignee ?? null) === next) {
+      setOwnerOpen(false);
+      return;
+    }
+    setOwnerSaving(true);
+    setError(null);
+    setAssignee(next);
+    try {
+      const res = await fetch(`/api/tasks/${row.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ assignee: next }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as {
+        task: { id: string; assignee: string | null };
+      };
+      onSaved({
+        affected: [{ id: data.task.id, assignee: data.task.assignee }],
+        newSnapshot: null,
+      });
+      setOwnerOpen(false);
+    } catch (e) {
+      setAssignee(row.assignee);
+      setError(e instanceof Error ? e.message : "Failed to update owner");
+    } finally {
+      setOwnerSaving(false);
+    }
+  }
+
   async function save() {
     setSaving(true);
     setError(null);
@@ -963,8 +1052,16 @@ function UpdateDrawer({
           status,
           blocked,
           priority,
+          // Leaf-only: server strips effortHours on parents, but gating it
+          // here too keeps the request clean and avoids confusing log noise.
+          ...(row.hasChildren
+            ? {}
+            : {
+                effortHours:
+                  estimate === "" ? null : Number(estimate),
+              }),
           remainingEffort:
-            remainingEffort === "" ? null : Number(remainingEffort),
+            effectiveRemaining === "" ? null : Number(effectiveRemaining),
           nextStep: nextStep.trim() ? nextStep : null,
           comment,
         }),
@@ -1062,6 +1159,23 @@ function UpdateDrawer({
         </button>
       </header>
 
+      <div className="tasks-drawer-owner">
+        <span className="tasks-drawer-owner__label">Owner</span>
+        <OwnerChip
+          assignee={assignee}
+          onClick={() => setOwnerOpen((v) => !v)}
+          saving={ownerSaving}
+        />
+        {ownerOpen && (
+          <OwnerPicker
+            people={people}
+            currentAssignee={assignee}
+            onSelect={(name) => void saveOwner(name)}
+            onClose={() => setOwnerOpen(false)}
+          />
+        )}
+      </div>
+
       {row.hasChildren ? (
         // Parent row in the master list — progress, remaining hours, and
         // health are all rollups of this row's leaves. A manual update
@@ -1122,19 +1236,56 @@ function UpdateDrawer({
             </label>
 
             <label className="tasks-field">
-              <span>Remaining effort (hrs)</span>
+              <span>Estimate (h)</span>
               <input
                 type="number"
                 min={0}
+                step={1}
                 placeholder="—"
-                value={remainingEffort}
+                value={estimate}
                 onChange={(e) =>
-                  setRemainingEffort(
+                  setEstimate(
                     e.target.value === ""
                       ? ""
                       : Math.max(0, Number(e.target.value)),
                   )
                 }
+                title="Total estimated hours. Remaining auto-derives from this × (1 − progress%) until you override it."
+              />
+            </label>
+
+            <label className="tasks-field">
+              <span>
+                Remaining (h)
+                {!remainingDirty && derivedRemaining != null && (
+                  <span className="tasks-field-hint"> · auto</span>
+                )}
+                {remainingDirty && (
+                  <button
+                    type="button"
+                    className="tasks-field-reset"
+                    onClick={() => setRemainingDirty(false)}
+                    title="Reset to estimate × (1 − progress%)"
+                  >
+                    reset
+                  </button>
+                )}
+              </span>
+              <input
+                type="number"
+                min={0}
+                placeholder={
+                  derivedRemaining != null ? String(derivedRemaining) : "—"
+                }
+                value={effectiveRemaining}
+                onChange={(e) => {
+                  setRemainingDirty(true);
+                  setRemainingEffort(
+                    e.target.value === ""
+                      ? ""
+                      : Math.max(0, Number(e.target.value)),
+                  );
+                }}
               />
             </label>
 
@@ -1260,6 +1411,188 @@ function UpdateDrawer({
         )}
       </section>
     </aside>
+  );
+}
+
+// ---------- Owner chip + autocomplete picker ----------
+
+// Exported so workstream-client.tsx (and anything else inside /tasks) can
+// reuse the exact same picker behavior. Keeping one implementation means
+// the "legacy" tagging, freeform-add flow, and keyboard handling stay
+// consistent across surfaces.
+export function initialsOf(name: string | null): string {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) return "?";
+  return (
+    trimmed
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((s) => s.charAt(0).toUpperCase())
+      .join("") || "?"
+  );
+}
+
+export function OwnerChip({
+  assignee,
+  onClick,
+  saving,
+}: {
+  assignee: string | null;
+  onClick: () => void;
+  saving: boolean;
+}) {
+  const has = !!(assignee && assignee.trim());
+  return (
+    <button
+      type="button"
+      className={
+        "tasks-owner-chip" + (has ? "" : " tasks-owner-chip--empty")
+      }
+      onClick={onClick}
+      disabled={saving}
+      title={has ? `Owner: ${assignee}` : "Assign an owner"}
+    >
+      <span className="tasks-owner-chip__avatar" aria-hidden>
+        {initialsOf(assignee)}
+      </span>
+      <span className="tasks-owner-chip__name">
+        {saving ? "Saving…" : has ? assignee : "Unassigned"}
+      </span>
+      <span className="tasks-owner-chip__chev" aria-hidden>
+        ▾
+      </span>
+    </button>
+  );
+}
+
+export function OwnerPicker({
+  people,
+  currentAssignee,
+  onSelect,
+  onClose,
+}: {
+  people: PersonOption[];
+  currentAssignee: string | null;
+  onSelect: (name: string | null) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    function onDoc(e: MouseEvent) {
+      if (!rootRef.current) return;
+      if (!rootRef.current.contains(e.target as Node)) onClose();
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? people.filter((p) => p.name.toLowerCase().includes(q))
+    : people;
+  // Surface an "Add as new owner" row when the query doesn't match any
+  // existing name. This lets the user type someone who isn't in the roster
+  // yet without bouncing them out to the People page.
+  const exact = people.some((p) => p.name.toLowerCase() === q);
+  const canCreate = q.length > 0 && !exact;
+
+  return (
+    <div ref={rootRef} className="tasks-owner-picker" role="dialog">
+      <input
+        ref={inputRef}
+        type="text"
+        className="tasks-owner-picker__input"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search or type a new owner…"
+      />
+      <ul className="tasks-owner-picker__list">
+        <li>
+          <button
+            type="button"
+            className={
+              "tasks-owner-picker__row tasks-owner-picker__row--clear" +
+              (!currentAssignee ? " tasks-owner-picker__row--current" : "")
+            }
+            onClick={() => onSelect(null)}
+          >
+            <span className="tasks-owner-picker__avatar" aria-hidden>
+              —
+            </span>
+            <span className="tasks-owner-picker__name">Unassigned</span>
+          </button>
+        </li>
+        {filtered.map((p) => (
+          <li key={p.id}>
+            <button
+              type="button"
+              className={
+                "tasks-owner-picker__row" +
+                (currentAssignee === p.name
+                  ? " tasks-owner-picker__row--current"
+                  : "") +
+                (!p.active ? " tasks-owner-picker__row--inactive" : "")
+              }
+              onClick={() => onSelect(p.name)}
+            >
+              <span className="tasks-owner-picker__avatar" aria-hidden>
+                {initialsOf(p.name)}
+              </span>
+              <span className="tasks-owner-picker__meta">
+                <span className="tasks-owner-picker__name">{p.name}</span>
+                {p.role && (
+                  <span className="tasks-owner-picker__role">{p.role}</span>
+                )}
+              </span>
+              {p.source === "freeform" && (
+                <span
+                  className="tasks-owner-picker__tag"
+                  title="Used on a task but not in the roster"
+                >
+                  legacy
+                </span>
+              )}
+              {!p.active && (
+                <span className="tasks-owner-picker__tag">inactive</span>
+              )}
+            </button>
+          </li>
+        ))}
+        {canCreate && (
+          <li>
+            <button
+              type="button"
+              className="tasks-owner-picker__row tasks-owner-picker__row--new"
+              onClick={() => onSelect(query.trim())}
+            >
+              <span className="tasks-owner-picker__avatar" aria-hidden>
+                +
+              </span>
+              <span className="tasks-owner-picker__name">
+                Assign to &ldquo;{query.trim()}&rdquo;
+              </span>
+            </button>
+          </li>
+        )}
+        {!canCreate && filtered.length === 0 && (
+          <li className="tasks-owner-picker__empty">No matches.</li>
+        )}
+      </ul>
+    </div>
   );
 }
 

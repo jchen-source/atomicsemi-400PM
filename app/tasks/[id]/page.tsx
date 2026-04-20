@@ -4,6 +4,8 @@ import { prisma } from "@/lib/db";
 import { computeHealth } from "@/lib/health";
 import { parseTags } from "@/lib/utils";
 import { parseIssueMeta } from "@/lib/open-issues";
+import { ensurePersonTable } from "@/lib/person-bootstrap";
+import type { PersonOption } from "../tasks-client";
 import type {
   BurndownSnapshotInput,
   BurndownTaskInput,
@@ -37,12 +39,50 @@ export default async function WorkstreamPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  await ensurePersonTable();
 
-  const all = await prisma.task.findMany({
-    orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
-  });
+  const [all, rawPeople] = await Promise.all([
+    prisma.task.findMany({
+      orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+    }),
+    prisma.person.findMany({
+      orderBy: [{ active: "desc" }, { name: "asc" }],
+      select: { id: true, name: true, role: true, active: true },
+    }),
+  ]);
   const parent = all.find((t) => t.id === id);
   if (!parent) notFound();
+
+  // Merge Person roster with any free-form assignees found on tasks, so the
+  // picker in the card owner chip autocompletes against the same union the
+  // master /tasks page uses. Keeps behavior predictable across surfaces.
+  const people: PersonOption[] = (() => {
+    const byName = new Map<string, PersonOption>();
+    for (const p of rawPeople) {
+      byName.set(p.name, {
+        id: p.id,
+        name: p.name,
+        role: p.role,
+        active: p.active,
+        source: "roster",
+      });
+    }
+    for (const t of all) {
+      const raw = (t.assignee ?? "").trim();
+      if (!raw || byName.has(raw)) continue;
+      byName.set(raw, {
+        id: `freeform:${raw}`,
+        name: raw,
+        role: null,
+        active: true,
+        source: "freeform",
+      });
+    }
+    return [...byName.values()].sort((a, b) => {
+      if (a.active !== b.active) return a.active ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+  })();
 
   // Walk down the tree from `parent` and collect every descendant. Direct
   // children become cards; leaves feed the big rollup chart.
@@ -265,6 +305,7 @@ export default async function WorkstreamPage({
         burnSnapshots={burnSnapshots}
         displaySnapshots={displaySnapshots}
         nowISO={now.toISOString()}
+        people={people}
       />
     </div>
   );

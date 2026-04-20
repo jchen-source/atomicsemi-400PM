@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
 import { UpdateTaskSchema } from "@/lib/validation";
 import {
@@ -153,6 +154,18 @@ export async function PATCH(req: Request, ctx: RouteCtx) {
   const affected = await prisma.task.findMany({
     where: { id: { in: updatedIds } },
   });
+
+  try {
+    revalidatePath("/");
+    revalidatePath("/tasks");
+    revalidatePath(`/tasks/${id}`);
+    if (updatedTask.parentId) {
+      revalidatePath(`/tasks/${updatedTask.parentId}`);
+    }
+    revalidatePath("/open-issues");
+  } catch {
+    // no-op outside request lifecycle
+  }
 
   return NextResponse.json({
     task: { ...updatedTask, tags: parseTags(updatedTask.tags) },

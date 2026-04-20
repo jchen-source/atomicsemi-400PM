@@ -1,0 +1,1294 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  DATE_RANGES,
+  SAVED_VIEWS,
+  dateRangeMatches,
+  filterPredicate,
+  type DateRange,
+  type FilterContext,
+  type SavedView,
+  type TaskLike,
+} from "@/lib/filters";
+import {
+  BurndownChart,
+  buildParentSeries,
+  buildProjectSeries,
+  buildTaskSeries,
+  type BurndownSnapshotInput,
+  type BurndownTaskInput,
+} from "./burndown-chart";
+
+export type TaskRow = {
+  id: string;
+  title: string;
+  parentId: string | null;
+  depth: number;
+  hasChildren: boolean;
+  rowType: "program" | "workstream" | "task" | "subtask";
+  status: string;
+  assignee: string | null;
+  priority: "high" | "medium" | "low" | null;
+  startDate: string;
+  endDate: string;
+  progress: number;
+  effortHours: number | null;
+  remainingEffort: number | null;
+  blocked: boolean;
+  nextStep: string | null;
+  health: "green" | "yellow" | "red" | null;
+  expectedProgress: number;
+  lastProgressAt: string | null;
+  latestComment: string | null;
+  latestCommentAt: string | null;
+  tags: string;
+  updatedAt: string;
+};
+
+export type TaskSnapshot = {
+  id: string;
+  taskId: string;
+  createdAt: string;
+  comment: string;
+  progress: number | null;
+  remainingEffort: number | null;
+  status: string | null;
+  blocked: boolean | null;
+  health: string | null;
+};
+
+type FilterRow = Omit<TaskLike, "startDate" | "endDate" | "lastProgressAt"> & {
+  startDate: string;
+  endDate: string;
+  lastProgressAt: string | null;
+};
+
+type Props = {
+  rows: TaskRow[];
+  filterRows: FilterRow[];
+  predEndDatesByDependent: Record<string, string[]>;
+  initialSnapshots: TaskSnapshot[];
+  burnTasks: BurndownTaskInput[];
+  burnSnapshots: BurndownSnapshotInput[];
+  nowISO: string;
+};
+
+const STATUS_OPTIONS = ["TODO", "IN_PROGRESS", "BLOCKED", "DONE"] as const;
+
+export default function TasksClient({
+  rows: initialRows,
+  filterRows: initialFilterRows,
+  predEndDatesByDependent,
+  burnTasks: initialBurnTasks,
+  burnSnapshots: initialBurnSnapshots,
+  nowISO,
+}: Props) {
+  const router = useRouter();
+  const [rows, setRows] = useState<TaskRow[]>(initialRows);
+  const [filterRows, setFilterRows] = useState<FilterRow[]>(initialFilterRows);
+  const [view, setView] = useState<SavedView>("all");
+  const [dateRange, setDateRange] = useState<DateRange>("any");
+  const [search, setSearch] = useState("");
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [snapshots, setSnapshots] = useState<TaskSnapshot[]>([]);
+  const [loadingSnapshots, setLoadingSnapshots] = useState(false);
+  const [burnChartOpen, setBurnChartOpen] = useState(true);
+
+  // Burndown inputs — grow as the user saves updates in this session so the
+  // project-wide strip and the in-drawer chart reflect new snapshots without
+  // waiting for router.refresh() to repaint.
+  const [burnTasks, setBurnTasks] = useState<BurndownTaskInput[]>(
+    initialBurnTasks,
+  );
+  const [burnSnapshots, setBurnSnapshots] = useState<BurndownSnapshotInput[]>(
+    initialBurnSnapshots,
+  );
+
+  // Keep rows in sync when the server re-renders after router.refresh().
+  useEffect(() => setRows(initialRows), [initialRows]);
+  useEffect(() => setFilterRows(initialFilterRows), [initialFilterRows]);
+  useEffect(() => setBurnTasks(initialBurnTasks), [initialBurnTasks]);
+  useEffect(
+    () => setBurnSnapshots(initialBurnSnapshots),
+    [initialBurnSnapshots],
+  );
+
+  const filterCtx: FilterContext = useMemo(() => {
+    const map = new Map<string, Date[]>();
+    for (const [k, v] of Object.entries(predEndDatesByDependent)) {
+      map.set(
+        k,
+        v.map((d) => new Date(d)),
+      );
+    }
+    return { now: new Date(nowISO), predEndDatesByDependent: map };
+  }, [predEndDatesByDependent, nowISO]);
+
+  // Chip counts use the shared predicate so server vs. client stay aligned.
+  // We AND the active date range into each chip's count so the numbers
+  // reflect what the user will actually see once they click a chip — e.g.
+  // "At risk (2)" after choosing This month means 2 at-risk rows that also
+  // touch this month.
+  const counts = useMemo(() => {
+    const out: Record<SavedView, number> = {
+      all: 0,
+      inProgress: 0,
+      blocked: 0,
+      overdue: 0,
+      lateStart: 0,
+      atRisk: 0,
+      needsUpdate: 0,
+      byOwner: 0,
+      byWorkstream: 0,
+    };
+    for (const row of filterRows) {
+      if (!dateRangeMatches(row, dateRange, filterCtx.now)) continue;
+      for (const v of SAVED_VIEWS) {
+        if (filterPredicate(v.id, row, filterCtx)) out[v.id]++;
+      }
+    }
+    return out;
+  }, [filterRows, filterCtx, dateRange]);
+
+  // Build set of ids matching the current view + date range (AND).
+  const matchingIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const row of filterRows) {
+      if (!filterPredicate(view, row, filterCtx)) continue;
+      if (!dateRangeMatches(row, dateRange, filterCtx.now)) continue;
+      s.add(row.id);
+    }
+    return s;
+  }, [filterRows, view, filterCtx, dateRange]);
+
+  // Search filter (client-only, substring on title / assignee).
+  const searchIds = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return null;
+    const s = new Set<string>();
+    for (const r of rows) {
+      if (
+        r.title.toLowerCase().includes(q) ||
+        (r.assignee ?? "").toLowerCase().includes(q)
+      ) {
+        s.add(r.id);
+      }
+    }
+    return s;
+  }, [rows, search]);
+
+  // Rows to render: matches view + search. Also include all ancestors of a
+  // match so the hierarchy stays legible (a filtered Subtask still shows its
+  // Program/Workstream/Task chain).
+  const rowById = useMemo(() => {
+    const m = new Map<string, TaskRow>();
+    for (const r of rows) m.set(r.id, r);
+    return m;
+  }, [rows]);
+
+  const visibleIds = useMemo(() => {
+    const intersection = new Set<string>();
+    for (const id of matchingIds) {
+      if (searchIds && !searchIds.has(id)) continue;
+      intersection.add(id);
+    }
+    // Add ancestors so filtered descendants render in context.
+    const withAncestors = new Set(intersection);
+    for (const id of intersection) {
+      let cur = rowById.get(id)?.parentId ?? null;
+      while (cur) {
+        if (withAncestors.has(cur)) break;
+        withAncestors.add(cur);
+        cur = rowById.get(cur)?.parentId ?? null;
+      }
+    }
+    return withAncestors;
+  }, [matchingIds, searchIds, rowById]);
+
+  // Apply collapsed folders: if any ancestor is collapsed, hide this row.
+  const isHiddenByCollapse = useCallback(
+    (row: TaskRow): boolean => {
+      let cur = row.parentId;
+      while (cur) {
+        if (collapsed.has(cur)) return true;
+        cur = rowById.get(cur)?.parentId ?? null;
+      }
+      return false;
+    },
+    [collapsed, rowById],
+  );
+
+  // Group-by renderers for byOwner / byWorkstream. Everything else renders
+  // as the indented flat table.
+  const groupKey = useCallback(
+    (row: TaskRow): string => {
+      if (view === "byOwner") return row.assignee?.trim() || "Unassigned";
+      if (view === "byWorkstream") {
+        let cur: TaskRow | undefined = row;
+        while (cur && cur.parentId) {
+          const parent = rowById.get(cur.parentId);
+          if (!parent) break;
+          cur = parent;
+        }
+        return cur?.title ?? "Top level";
+      }
+      return "";
+    },
+    [view, rowById],
+  );
+
+  const displayRows = useMemo(() => {
+    const out = rows.filter(
+      (r) => visibleIds.has(r.id) && !isHiddenByCollapse(r),
+    );
+    if (view === "byOwner" || view === "byWorkstream") {
+      // Group + sort inside group by title.
+      const groups = new Map<string, TaskRow[]>();
+      for (const r of out) {
+        const k = groupKey(r);
+        const arr = groups.get(k) ?? [];
+        arr.push(r);
+        groups.set(k, arr);
+      }
+      const groupList: { key: string; items: TaskRow[] }[] = [];
+      for (const [k, v] of groups) {
+        v.sort((a, b) => a.title.localeCompare(b.title));
+        groupList.push({ key: k, items: v });
+      }
+      groupList.sort((a, b) => a.key.localeCompare(b.key));
+      return { mode: "grouped" as const, groups: groupList };
+    }
+    return { mode: "flat" as const, items: out };
+  }, [rows, visibleIds, isHiddenByCollapse, view, groupKey]);
+
+  // Drawer actions
+  const active = activeId ? rowById.get(activeId) ?? null : null;
+
+  const loadSnapshots = useCallback(async (taskId: string) => {
+    setLoadingSnapshots(true);
+    try {
+      const res = await fetch(`/api/tasks/${taskId}`);
+      if (!res.ok) return;
+      const json = (await res.json()) as {
+        updates?: Array<TaskSnapshot & { commentType?: string }>;
+      };
+      const snaps = (json.updates ?? [])
+        .filter((u) => (u.commentType ?? "PROGRESS") === "PROGRESS")
+        .slice(0, 20)
+        .map((u) => ({
+          id: u.id,
+          taskId,
+          createdAt: u.createdAt,
+          comment: u.comment,
+          progress: u.progress ?? null,
+          remainingEffort: u.remainingEffort ?? null,
+          status: u.status ?? null,
+          blocked: u.blocked ?? null,
+          health: u.health ?? null,
+        }));
+      setSnapshots(snaps);
+    } finally {
+      setLoadingSnapshots(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeId) loadSnapshots(activeId);
+    else setSnapshots([]);
+  }, [activeId, loadSnapshots]);
+
+  // Project-wide burndown: every leaf task in the hierarchy rolled into one
+  // effort-weighted curve. Recomputes on every local state change so a save
+  // updates the strip instantly.
+  const projectSeries = useMemo(() => {
+    return buildProjectSeries(
+      { tasks: burnTasks, snapshots: burnSnapshots, nowMs: Date.now() },
+      "All programs",
+    );
+  }, [burnTasks, burnSnapshots]);
+
+  // The drawer's mini chart. Leaves get a single-task series; parents (rows
+  // with children) get a parent rollup so workstream/program rows show
+  // aggregate progress.
+  const drawerSeries = useMemo(() => {
+    if (!activeId) return null;
+    const row = rowById.get(activeId);
+    if (!row) return null;
+    const inputs = {
+      tasks: burnTasks,
+      snapshots: burnSnapshots,
+      nowMs: Date.now(),
+    };
+    return row.hasChildren
+      ? buildParentSeries(activeId, inputs)
+      : buildTaskSeries(activeId, inputs);
+  }, [activeId, rowById, burnTasks, burnSnapshots]);
+
+  const patchRowLocally = useCallback(
+    (affected: Array<Partial<TaskRow> & { id: string }>) => {
+      setRows((prev) =>
+        prev.map((r) => {
+          const hit = affected.find((a) => a.id === r.id);
+          if (!hit) return r;
+          return { ...r, ...hit };
+        }),
+      );
+      setFilterRows((prev) =>
+        prev.map((r) => {
+          const hit = affected.find((a) => a.id === r.id);
+          if (!hit) return r;
+          return {
+            ...r,
+            status: (hit.status as string | undefined) ?? r.status,
+            progress:
+              hit.progress !== undefined ? (hit.progress as number) : r.progress,
+            blocked:
+              hit.blocked !== undefined ? (hit.blocked as boolean) : r.blocked,
+            startDate:
+              (hit.startDate as string | undefined) ?? r.startDate,
+            endDate: (hit.endDate as string | undefined) ?? r.endDate,
+            lastProgressAt:
+              (hit.lastProgressAt as string | null | undefined) ??
+              r.lastProgressAt,
+            priority:
+              hit.priority !== undefined
+                ? (hit.priority as FilterRow["priority"])
+                : r.priority,
+          } as FilterRow;
+        }),
+      );
+    },
+    [],
+  );
+
+  return (
+    <div className="tasks-page">
+      <FilterBar
+        view={view}
+        setView={setView}
+        counts={counts}
+        search={search}
+        setSearch={setSearch}
+        dateRange={dateRange}
+        setDateRange={setDateRange}
+        rangeCount={matchingIds.size}
+      />
+
+      {projectSeries && (
+        <section
+          className={
+            "tasks-burn-strip" + (burnChartOpen ? "" : " tasks-burn-strip--collapsed")
+          }
+        >
+          <header className="tasks-burn-strip-head">
+            <div>
+              <h2>Project burndown</h2>
+              <p>
+                Live rollup of every leaf task — each progress update appends a
+                point to the actual line.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="tasks-burn-toggle"
+              onClick={() => setBurnChartOpen((v) => !v)}
+              aria-expanded={burnChartOpen}
+            >
+              {burnChartOpen ? "Hide chart" : "Show chart"}
+            </button>
+          </header>
+          {burnChartOpen && <BurndownChart series={projectSeries} compact />}
+        </section>
+      )}
+
+      <div className="tasks-shell">
+        <div className="tasks-table-wrap">
+          <TasksTableHeader />
+          {displayRows.mode === "flat" ? (
+            displayRows.items.length === 0 ? (
+              <EmptyState view={view} />
+            ) : (
+              displayRows.items.map((r) => (
+                <TasksRow
+                  key={r.id}
+                  row={r}
+                  active={r.id === activeId}
+                  collapsed={collapsed.has(r.id)}
+                  onToggleCollapse={() =>
+                    setCollapsed((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(r.id)) next.delete(r.id);
+                      else next.add(r.id);
+                      return next;
+                    })
+                  }
+                  onOpen={() => {
+                    // Parent rows (anything with children: programs + work-
+                    // streams + parent tasks) go to the dedicated standup
+                    // page. Leaf rows keep the inline drawer for quick edits.
+                    if (r.hasChildren) {
+                      router.push(`/tasks/${r.id}`);
+                    } else {
+                      setActiveId(r.id);
+                    }
+                  }}
+                />
+              ))
+            )
+          ) : displayRows.groups.length === 0 ? (
+            <EmptyState view={view} />
+          ) : (
+            displayRows.groups.map((g) => (
+              <div key={g.key} className="tasks-group">
+                <div className="tasks-group-header">{g.key}</div>
+                {g.items.map((r) => (
+                  <TasksRow
+                    key={r.id}
+                    row={{ ...r, depth: 0, hasChildren: false }}
+                    active={r.id === activeId}
+                    collapsed={false}
+                    onToggleCollapse={() => {}}
+                    onOpen={() => {
+                      // In grouped views every row is displayed as a leaf,
+                      // but the underlying task may still have children —
+                      // use the original `r.hasChildren` for routing intent.
+                      if (r.hasChildren) router.push(`/tasks/${r.id}`);
+                      else setActiveId(r.id);
+                    }}
+                  />
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+        {active && (
+          <UpdateDrawer
+            key={active.id}
+            row={active}
+            snapshots={snapshots}
+            loadingSnapshots={loadingSnapshots}
+            series={drawerSeries}
+            onClose={() => setActiveId(null)}
+            onSaved={({ affected, newSnapshot }) => {
+              patchRowLocally(
+                affected.map((a) => ({
+                  id: a.id,
+                  status: a.status,
+                  progress: a.progress,
+                  blocked: a.blocked,
+                  priority: a.priority ?? null,
+                  startDate: a.startDate,
+                  endDate: a.endDate,
+                  health: a.health ?? null,
+                  remainingEffort: a.remainingEffort ?? null,
+                  nextStep: a.nextStep ?? null,
+                  lastProgressAt: a.lastProgressAt ?? null,
+                  effortHours: a.effortHours ?? null,
+                })),
+              );
+              if (newSnapshot) {
+                setSnapshots((prev) => [newSnapshot, ...prev].slice(0, 20));
+                setRows((prev) =>
+                  prev.map((r) =>
+                    r.id === active.id
+                      ? {
+                          ...r,
+                          latestComment:
+                            newSnapshot.comment || r.latestComment,
+                          latestCommentAt: newSnapshot.createdAt,
+                        }
+                      : r,
+                  ),
+                );
+                // Push the new snapshot into the burndown input list so the
+                // project strip + drawer chart redraw with the fresh point
+                // without waiting for router.refresh() to round-trip.
+                setBurnSnapshots((prev) => [
+                  ...prev,
+                  {
+                    id: newSnapshot.id,
+                    taskId: active.id,
+                    createdAt: newSnapshot.createdAt,
+                    progress: newSnapshot.progress ?? 0,
+                    remainingEffort: newSnapshot.remainingEffort ?? null,
+                    status: newSnapshot.status ?? null,
+                    health:
+                      (newSnapshot.health as "green" | "yellow" | "red" | null) ??
+                      null,
+                    comment: newSnapshot.comment ?? "",
+                  },
+                ]);
+              }
+              // Also keep the burnTasks cache current so parent rollups (and
+              // the task-level series when the drawer is open on a parent)
+              // reflect the just-saved progress/status/health.
+              setBurnTasks((prev) =>
+                prev.map((t) => {
+                  const hit = affected.find((a) => a.id === t.id);
+                  if (!hit) return t;
+                  return {
+                    ...t,
+                    progress:
+                      typeof hit.progress === "number" ? hit.progress : t.progress,
+                    status: hit.status ?? t.status,
+                    blocked:
+                      typeof hit.blocked === "boolean" ? hit.blocked : t.blocked,
+                    health:
+                      (hit.health as
+                        | "green"
+                        | "yellow"
+                        | "red"
+                        | null
+                        | undefined) ?? t.health,
+                    startDate: hit.startDate ?? t.startDate,
+                    endDate: hit.endDate ?? t.endDate,
+                  };
+                }),
+              );
+              router.refresh();
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FilterBar({
+  view,
+  setView,
+  counts,
+  search,
+  setSearch,
+  dateRange,
+  setDateRange,
+  rangeCount,
+}: {
+  view: SavedView;
+  setView: (v: SavedView) => void;
+  counts: Record<SavedView, number>;
+  search: string;
+  setSearch: (v: string) => void;
+  dateRange: DateRange;
+  setDateRange: (r: DateRange) => void;
+  /** Total matches under the current (view ∩ dateRange) filter — shown
+   *  inline with the dropdown so the user gets a quick confirmation. */
+  rangeCount: number;
+}) {
+  return (
+    <div className="tasks-filterbar">
+      <div className="tasks-filter-chips">
+        {SAVED_VIEWS.map((v) => {
+          // Severity chips get a tint hook in CSS so they telegraph urgency
+          // even when inactive. Non-severity chips stay neutral.
+          const tone =
+            v.id === "overdue" || v.id === "blocked"
+              ? " tasks-chip--danger"
+              : v.id === "lateStart" || v.id === "atRisk"
+                ? " tasks-chip--warn"
+                : "";
+          return (
+            <button
+              key={v.id}
+              type="button"
+              className={
+                "tasks-chip" +
+                tone +
+                (view === v.id ? " tasks-chip--active" : "")
+              }
+              onClick={() => setView(v.id)}
+              data-chip-id={v.id}
+            >
+              <span>{v.label}</span>
+              <span className="tasks-chip-count">{counts[v.id]}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <label
+        className={
+          "tasks-rangepicker" +
+          (dateRange !== "any" ? " tasks-rangepicker--active" : "")
+        }
+        title="Limit the list to tasks that overlap this window"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <rect x="3" y="5" width="18" height="16" rx="2" />
+          <path d="M16 3v4M8 3v4M3 11h18" />
+        </svg>
+        <select
+          value={dateRange}
+          onChange={(e) => setDateRange(e.target.value as DateRange)}
+          aria-label="Filter by date range"
+        >
+          {DATE_RANGES.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.label}
+            </option>
+          ))}
+        </select>
+        {dateRange !== "any" && (
+          <span className="tasks-rangepicker__count">{rangeCount}</span>
+        )}
+      </label>
+      <label className="tasks-search">
+        <svg
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <circle cx="11" cy="11" r="7" />
+          <path d="m20 20-3.5-3.5" />
+        </svg>
+        <input
+          type="search"
+          placeholder="Search tasks or owners…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+      </label>
+    </div>
+  );
+}
+
+function TasksTableHeader() {
+  return (
+    <div className="tasks-row tasks-row--header">
+      <div className="tasks-col tasks-col--title">Task</div>
+      <div className="tasks-col tasks-col--owner">Owner</div>
+      <div className="tasks-col tasks-col--priority">Priority</div>
+      <div className="tasks-col tasks-col--status">Status</div>
+      <div className="tasks-col tasks-col--date">Start</div>
+      <div className="tasks-col tasks-col--date">Due</div>
+      <div className="tasks-col tasks-col--progress">%</div>
+      <div className="tasks-col tasks-col--effort">Plan / Rem</div>
+      <div className="tasks-col tasks-col--health">Health</div>
+      <div className="tasks-col tasks-col--comment">Latest comment</div>
+      <div className="tasks-col tasks-col--updated">Updated</div>
+    </div>
+  );
+}
+
+function TasksRow({
+  row,
+  active,
+  collapsed,
+  onToggleCollapse,
+  onOpen,
+}: {
+  row: TaskRow;
+  active: boolean;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  onOpen: () => void;
+}) {
+  const start = new Date(row.startDate);
+  const end = new Date(row.endDate);
+  const updated = row.latestCommentAt
+    ? new Date(row.latestCommentAt)
+    : new Date(row.updatedAt);
+  const indent = row.depth * 14;
+
+  return (
+    <div
+      className={
+        "tasks-row" +
+        (active ? " tasks-row--active" : "") +
+        (row.blocked ? " tasks-row--blocked" : "") +
+        ` tasks-row--${row.rowType}`
+      }
+      onClick={onOpen}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+    >
+      <div
+        className="tasks-col tasks-col--title"
+        style={{ paddingLeft: 12 + indent }}
+      >
+        {row.hasChildren ? (
+          <button
+            type="button"
+            className={
+              "tasks-chevron" + (collapsed ? "" : " tasks-chevron--open")
+            }
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleCollapse();
+            }}
+            aria-label={collapsed ? "Expand" : "Collapse"}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="12"
+              height="12"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <polyline points="9 6 15 12 9 18" />
+            </svg>
+          </button>
+        ) : (
+          <span className="tasks-chevron tasks-chevron--spacer" aria-hidden />
+        )}
+        <RowTypeBadge rowType={row.rowType} />
+        <span className="tasks-title" title={row.title}>
+          {row.title}
+        </span>
+      </div>
+      <div className="tasks-col tasks-col--owner" title={row.assignee ?? ""}>
+        {row.assignee || <span className="tasks-muted">Unassigned</span>}
+      </div>
+      <div className="tasks-col tasks-col--priority">
+        <PriorityBadge priority={row.priority} />
+      </div>
+      <div className="tasks-col tasks-col--status">
+        <StatusBadge status={row.status} blocked={row.blocked} />
+      </div>
+      <div className="tasks-col tasks-col--date">{fmtDate(start)}</div>
+      <div className="tasks-col tasks-col--date">{fmtDate(end)}</div>
+      <div className="tasks-col tasks-col--progress">
+        <ProgressCell value={row.progress} expected={row.expectedProgress} />
+      </div>
+      <div className="tasks-col tasks-col--effort">
+        <span className="tasks-muted">
+          {row.effortHours ?? "—"}h
+          {row.remainingEffort != null
+            ? ` · ${row.remainingEffort}h left`
+            : ""}
+        </span>
+      </div>
+      <div className="tasks-col tasks-col--health">
+        <HealthDot health={row.health} />
+      </div>
+      <div className="tasks-col tasks-col--comment" title={row.latestComment ?? ""}>
+        {row.latestComment ? (
+          <span>{row.latestComment}</span>
+        ) : (
+          <span className="tasks-muted">No comments yet</span>
+        )}
+      </div>
+      <div className="tasks-col tasks-col--updated">{fmtRelative(updated)}</div>
+    </div>
+  );
+}
+
+function RowTypeBadge({ rowType }: { rowType: TaskRow["rowType"] }) {
+  const label: Record<TaskRow["rowType"], string> = {
+    program: "Program",
+    workstream: "Workstream",
+    task: "Task",
+    subtask: "Subtask",
+  };
+  return (
+    <span className={`tasks-typebadge tasks-typebadge--${rowType}`}>
+      {label[rowType]}
+    </span>
+  );
+}
+
+function PriorityBadge({ priority }: { priority: TaskRow["priority"] }) {
+  if (!priority) return <span className="tasks-muted">—</span>;
+  return (
+    <span className={`tasks-priority tasks-priority--${priority}`}>
+      {priority === "high" ? "High" : priority === "medium" ? "Med" : "Low"}
+    </span>
+  );
+}
+
+function StatusBadge({ status, blocked }: { status: string; blocked: boolean }) {
+  if (blocked && status !== "DONE") {
+    return <span className="tasks-status tasks-status--blocked">Blocked</span>;
+  }
+  const map: Record<string, { label: string; cls: string }> = {
+    TODO: { label: "To do", cls: "tasks-status--todo" },
+    IN_PROGRESS: { label: "In progress", cls: "tasks-status--ip" },
+    BLOCKED: { label: "Blocked", cls: "tasks-status--blocked" },
+    DONE: { label: "Done", cls: "tasks-status--done" },
+  };
+  const s = map[status] ?? { label: status, cls: "tasks-status--todo" };
+  return <span className={`tasks-status ${s.cls}`}>{s.label}</span>;
+}
+
+function ProgressCell({
+  value,
+  expected,
+}: {
+  value: number;
+  expected: number;
+}) {
+  return (
+    <div className="tasks-progress" title={`${value}% (expected ${expected}%)`}>
+      <div className="tasks-progress-bar">
+        <div
+          className="tasks-progress-fill"
+          style={{ width: `${Math.max(0, Math.min(100, value))}%` }}
+        />
+        <div
+          className="tasks-progress-expected"
+          style={{ left: `${Math.max(0, Math.min(100, expected))}%` }}
+        />
+      </div>
+      <span className="tasks-progress-num">{value}%</span>
+    </div>
+  );
+}
+
+function HealthDot({ health }: { health: TaskRow["health"] }) {
+  const color =
+    health === "red"
+      ? "#ef4444"
+      : health === "yellow"
+        ? "#eab308"
+        : health === "green"
+          ? "#16a34a"
+          : "#cbd5e1";
+  return (
+    <span
+      className="tasks-healthdot"
+      style={{ backgroundColor: color }}
+      title={health ?? "Unknown"}
+    />
+  );
+}
+
+function EmptyState({ view }: { view: SavedView }) {
+  const msg: Record<SavedView, string> = {
+    all: "No tasks yet. Add tasks from the Gantt.",
+    inProgress: "No tasks are currently in progress.",
+    blocked: "No blockers reported. Nice.",
+    overdue: "Nothing overdue — keep it up.",
+    lateStart:
+      "No tasks waiting to start — every scheduled row has momentum.",
+    atRisk: "No tasks falling behind pace. Keep it rolling.",
+    needsUpdate: "Every task is up to date.",
+    byOwner: "No owners assigned yet.",
+    byWorkstream: "No tasks grouped under a workstream.",
+  };
+  return <div className="tasks-empty">{msg[view]}</div>;
+}
+
+// ---------- Drawer ----------
+
+function UpdateDrawer({
+  row,
+  snapshots,
+  loadingSnapshots,
+  series,
+  onClose,
+  onSaved,
+}: {
+  row: TaskRow;
+  snapshots: TaskSnapshot[];
+  loadingSnapshots: boolean;
+  series: import("./burndown-chart").Series | null;
+  onClose: () => void;
+  onSaved: (r: {
+    affected: Array<
+      Partial<TaskRow> & {
+        id: string;
+        startDate?: string;
+        endDate?: string;
+        lastProgressAt?: string | null;
+        health?: TaskRow["health"];
+      }
+    >;
+    newSnapshot: TaskSnapshot | null;
+  }) => void;
+}) {
+  const router = useRouter();
+  const [progress, setProgress] = useState(row.progress);
+  const [status, setStatus] = useState(row.status);
+  const [blocked, setBlocked] = useState(row.blocked);
+  const [priority, setPriority] = useState<TaskRow["priority"]>(row.priority);
+  const [remainingEffort, setRemainingEffort] = useState<number | "">(
+    row.remainingEffort ?? "",
+  );
+  const [nextStep, setNextStep] = useState(row.nextStep ?? "");
+  const [comment, setComment] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const firstFieldRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    firstFieldRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tasks/${row.id}/progress`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          progress,
+          status,
+          blocked,
+          priority,
+          remainingEffort:
+            remainingEffort === "" ? null : Number(remainingEffort),
+          nextStep: nextStep.trim() ? nextStep : null,
+          comment,
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as {
+        task: {
+          id: string;
+          status: string;
+          progress: number;
+          blocked: boolean;
+          priority: string | null;
+          health: string | null;
+          lastProgressAt: string | null;
+          remainingEffort: number | null;
+          nextStep: string | null;
+          effortHours: number | null;
+          startDate: string;
+          endDate: string;
+        };
+        snapshot: TaskSnapshot;
+        affected: Array<{
+          id: string;
+          status: string;
+          progress: number;
+          blocked: boolean;
+          health: string | null;
+          startDate: string;
+          endDate: string;
+          effortHours: number | null;
+          remainingEffort: number | null;
+          lastProgressAt: string | null;
+          nextStep: string | null;
+          priority: string | null;
+        }>;
+      };
+      onSaved({
+        affected: data.affected.map((a) => ({
+          id: a.id,
+          status: a.status,
+          progress: a.progress,
+          blocked: a.blocked,
+          health: (a.health as TaskRow["health"]) ?? null,
+          startDate: a.startDate,
+          endDate: a.endDate,
+          effortHours: a.effortHours ?? null,
+          remainingEffort: a.remainingEffort ?? null,
+          lastProgressAt: a.lastProgressAt ?? null,
+          nextStep: a.nextStep ?? null,
+          priority: (a.priority as TaskRow["priority"]) ?? null,
+        })),
+        newSnapshot: data.snapshot
+          ? {
+              id: data.snapshot.id,
+              taskId: row.id,
+              createdAt: data.snapshot.createdAt,
+              comment: data.snapshot.comment,
+              progress: data.snapshot.progress ?? null,
+              remainingEffort: data.snapshot.remainingEffort ?? null,
+              status: data.snapshot.status ?? null,
+              blocked: data.snapshot.blocked ?? null,
+              health: data.snapshot.health ?? null,
+            }
+          : null,
+      });
+      setComment("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <aside className="tasks-drawer" role="dialog" aria-label="Update task">
+      <header className="tasks-drawer-header">
+        <div>
+          <p className="tasks-drawer-eyebrow">
+            <RowTypeBadge rowType={row.rowType} />
+          </p>
+          <h2 className="tasks-drawer-title">{row.title}</h2>
+        </div>
+        <button
+          type="button"
+          className="tasks-drawer-close"
+          onClick={onClose}
+          aria-label="Close"
+        >
+          ×
+        </button>
+      </header>
+
+      {row.hasChildren ? (
+        // Parent row in the master list — progress, remaining hours, and
+        // health are all rollups of this row's leaves. A manual update
+        // here would be immediately clobbered by the next child save,
+        // so we gate the editor entirely and point the user at the
+        // workstream drill-in where the leaves live.
+        <aside className="tasks-drawer-rollup">
+          <div className="tasks-drawer-rollup__icon" aria-hidden>
+            ↯
+          </div>
+          <div className="tasks-drawer-rollup__body">
+            <p className="tasks-drawer-rollup__head">
+              Updates roll up from subtasks
+            </p>
+            <p className="tasks-drawer-rollup__sub">
+              This row summarizes its leaves. Push progress, comments,
+              and remaining hours on a subtask — everything aggregates
+              back up here automatically.
+            </p>
+            <button
+              type="button"
+              className="roadmap-btn roadmap-btn--primary tasks-drawer-rollup__cta"
+              onClick={() => {
+                onClose();
+                router.push(`/tasks/${row.id}`);
+              }}
+            >
+              Open workstream →
+            </button>
+          </div>
+        </aside>
+      ) : (
+        <>
+          <div className="tasks-drawer-grid">
+            <label className="tasks-field">
+              <span>% complete</span>
+              <div className="tasks-field-row">
+                <input
+                  ref={firstFieldRef}
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={progress}
+                  onChange={(e) => setProgress(Number(e.target.value))}
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={progress}
+                  onChange={(e) =>
+                    setProgress(
+                      Math.max(0, Math.min(100, Number(e.target.value) || 0)),
+                    )
+                  }
+                />
+              </div>
+            </label>
+
+            <label className="tasks-field">
+              <span>Remaining effort (hrs)</span>
+              <input
+                type="number"
+                min={0}
+                placeholder="—"
+                value={remainingEffort}
+                onChange={(e) =>
+                  setRemainingEffort(
+                    e.target.value === ""
+                      ? ""
+                      : Math.max(0, Number(e.target.value)),
+                  )
+                }
+              />
+            </label>
+
+            <label className="tasks-field">
+              <span>Status</span>
+              <select
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+              >
+                {STATUS_OPTIONS.map((s) => (
+                  <option key={s} value={s}>
+                    {s.replace("_", " ")}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="tasks-field">
+              <span>Priority</span>
+              <select
+                value={priority ?? ""}
+                onChange={(e) =>
+                  setPriority(
+                    (e.target.value || null) as TaskRow["priority"],
+                  )
+                }
+              >
+                <option value="">—</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </label>
+
+            <label className="tasks-field tasks-field--toggle">
+              <input
+                type="checkbox"
+                checked={blocked}
+                onChange={(e) => setBlocked(e.target.checked)}
+              />
+              <span>Blocked</span>
+            </label>
+          </div>
+
+          <label className="tasks-field tasks-field--full">
+            <span>Next step</span>
+            <textarea
+              rows={2}
+              placeholder="What's the single next thing needed to move this forward?"
+              value={nextStep}
+              onChange={(e) => setNextStep(e.target.value)}
+            />
+          </label>
+
+          <label className="tasks-field tasks-field--full">
+            <span>Progress comment</span>
+            <textarea
+              rows={3}
+              placeholder="One-line status update. This gets timestamped and feeds the burndown chart."
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+            />
+          </label>
+
+          {error && <p className="tasks-drawer-error">{error}</p>}
+
+          <div className="tasks-drawer-actions">
+            <button
+              type="button"
+              className="roadmap-btn roadmap-btn--ghost"
+              onClick={onClose}
+              disabled={saving}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="roadmap-btn roadmap-btn--primary"
+              onClick={save}
+              disabled={saving}
+            >
+              {saving ? "Saving…" : "Save update"}
+            </button>
+          </div>
+        </>
+      )}
+
+      {series && (
+        <section className="tasks-drawer-chart">
+          <h3>
+            {row.hasChildren ? "Rollup burndown" : "Task burndown"}
+          </h3>
+          <BurndownChart series={series} compact />
+        </section>
+      )}
+
+      <section className="tasks-drawer-history">
+        <h3>History</h3>
+        {loadingSnapshots ? (
+          <p className="tasks-muted">Loading…</p>
+        ) : snapshots.length === 0 ? (
+          <p className="tasks-muted">No snapshots yet. Save one above.</p>
+        ) : (
+          <ol className="tasks-snapshot-list">
+            {snapshots.map((s) => (
+              <li key={s.id} className="tasks-snapshot">
+                <div className="tasks-snapshot-meta">
+                  <time>{fmtDateTime(new Date(s.createdAt))}</time>
+                  <span className="tasks-snapshot-numbers">
+                    {s.progress ?? 0}%
+                    {s.remainingEffort != null
+                      ? ` · ${s.remainingEffort}h left`
+                      : ""}
+                  </span>
+                  <HealthDot
+                    health={(s.health as TaskRow["health"]) ?? null}
+                  />
+                </div>
+                {s.comment && <p>{s.comment}</p>}
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
+    </aside>
+  );
+}
+
+// ---------- helpers ----------
+
+function fmtDate(d: Date) {
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function fmtDateTime(d: Date) {
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function fmtRelative(d: Date) {
+  if (Number.isNaN(d.getTime())) return "—";
+  const diff = Date.now() - d.getTime();
+  const m = Math.round(diff / 60_000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const days = Math.round(h / 24);
+  if (days < 7) return `${days}d ago`;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}

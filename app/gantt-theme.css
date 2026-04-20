@@ -788,6 +788,25 @@
   background: #ef4444;
 }
 
+/* Any bar whose task has a slipping linked issue gets an explicit red
+   background + red border so the whole row reads as red at a glance, not
+   just the dot in the corner. Overrides urgency-color fills on leaves. */
+.task-pill-wrap:has(.task-issue-indicator--slipping) .task-pill {
+  background: #fee2e2 !important;
+  border-color: rgba(239, 68, 68, 0.9) !important;
+  box-shadow:
+    0 0 0 1.5px rgba(239, 68, 68, 0.35),
+    0 4px 14px rgba(239, 68, 68, 0.18) !important;
+}
+.task-pill-wrap:has(.task-issue-indicator--slipping) .task-pill__fill {
+  background: #ef4444 !important;
+  opacity: 0.78;
+}
+.task-pill-wrap:has(.task-issue-indicator--slipping) .task-pill__label,
+.task-pill-wrap:has(.task-issue-indicator--slipping) .task-pill__pct {
+  color: #7f1d1d !important;
+}
+
 /* ---- Today line ----------------------------------------------------
    A thin, non-interactive red rule painted at today's date inside the
    Gantt chart area. Positioned with a pixel-per-ms ratio derived from
@@ -1078,6 +1097,33 @@
   left: 0;
   bottom: 0;
   opacity: 0.25;
+}
+
+/* Thin left-side rail reflecting the snapshot-driven health of this task.
+   Sits on top of the fill so it stays visible even as progress grows,
+   and below the label so text remains readable. */
+.task-pill__health-rail {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 0;
+  width: 3px;
+  border-radius: 2px;
+  z-index: 1;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
+}
+
+.task-pill__health-rail--green {
+  background: #16a34a;
+}
+
+.task-pill__health-rail--yellow {
+  background: #eab308;
+}
+
+.task-pill__health-rail--red {
+  background: #ef4444;
 }
 
 .task-pill__text {

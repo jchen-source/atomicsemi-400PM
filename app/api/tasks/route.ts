@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { revalidatePath } from "next/cache";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { CreateTaskSchema } from "@/lib/validation";
@@ -55,6 +56,18 @@ export async function POST(req: Request) {
     const rolled = await rollupFromParentId(tx, task.parentId);
     return { task, rolled: [...rolled] };
   });
+
+  try {
+    revalidatePath("/");
+    revalidatePath("/tasks");
+    revalidatePath("/open-issues");
+    if (result.task.parentId) {
+      revalidatePath(`/tasks/${result.task.parentId}`);
+    }
+  } catch {
+    // no-op outside request lifecycle
+  }
+
   return NextResponse.json(
     { ...result.task, tags: parseTags(result.task.tags), affected: result.rolled },
     { status: 201 },

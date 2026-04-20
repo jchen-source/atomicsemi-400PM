@@ -224,6 +224,12 @@ export default async function GanttPage() {
             depsCount: (incomingDepsByTask.get(t.id) ?? []).length,
             progress: t.progress,
             urgency: urgencyFromTags(parseTags(t.tags)),
+            health:
+              t.health === "green" ||
+              t.health === "yellow" ||
+              t.health === "red"
+                ? t.health
+                : null,
             effortHours: t.effortHours ?? null,
             assignee: t.assignee ?? null,
             resourceAllocated: t.resourceAllocated ?? null,

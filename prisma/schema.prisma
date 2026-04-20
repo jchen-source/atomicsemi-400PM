@@ -39,6 +39,17 @@ model Task {
   effortHours Int?
   tags     String  @default("[]") // JSON-encoded string[]
 
+  // Execution fields used by the master task list at /tasks. `priority`,
+  // `blocked`, and `nextStep` are editable from the task drawer; `health`
+  // and `lastProgressAt` are server-computed whenever a progress snapshot
+  // is written (see app/api/tasks/[id]/progress).
+  priority        String?    // high | medium | low (falls back to tags urgency:* for legacy rows)
+  remainingEffort Int?
+  blocked         Boolean    @default(false)
+  nextStep        String?
+  health          String?    // green | yellow | red (cached; recomputed on every progress write)
+  lastProgressAt  DateTime?
+
   sortOrder Int @default(0)
 
   createdAt DateTime @default(now())
@@ -49,6 +60,8 @@ model Task {
   @@index([linkedTaskId])
   @@index([type])
   @@index([status])
+  @@index([assignee])
+  @@index([lastProgressAt])
 }
 
 model TaskUpdate {
@@ -61,6 +74,12 @@ model TaskUpdate {
   effortHours Int?
   assignee String?
   resourceAllocated String?
+  // Snapshot-driven execution fields. Written by /api/tasks/[id]/progress so
+  // /burndown and the history drawer can reconstruct any task's trajectory.
+  remainingEffort Int?
+  status          String?
+  blocked         Boolean?
+  health          String?
   createdAt DateTime @default(now())
 
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)

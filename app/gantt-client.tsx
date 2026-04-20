@@ -43,6 +43,12 @@ export type GanttTaskInput = {
   type: "summary" | "task";
   rowType: "EPIC" | "TASK" | "ISSUE";
   urgency?: "high" | "medium" | "low";
+  /**
+   * Cached task health from the last progress snapshot. Renders as a
+   * thin colored rail on the left of the bar so slipping work surfaces
+   * at a glance in addition to its urgency color.
+   */
+  health?: "green" | "yellow" | "red" | null;
   effortHours?: number | null;
   assignee?: string | null;
   resourceAllocated?: string | null;
@@ -771,6 +777,20 @@ export default function GanttClient({
     return map;
   }, [tasks]);
 
+  // Cached health (green / yellow / red) keyed by task id. Populated from
+  // `Task.health` server-side. Rendered as a thin left-side rail on the bar
+  // so the visual hierarchy of urgency (bar color) and health (rail) stays
+  // readable instead of fighting each other.
+  const healthById = useMemo(() => {
+    const map = new Map<string, "green" | "yellow" | "red">();
+    for (const t of tasks) {
+      if (t.health === "green" || t.health === "yellow" || t.health === "red") {
+        map.set(t.id, t.health);
+      }
+    }
+    return map;
+  }, [tasks]);
+
   const childCountById = useMemo(() => {
     const map = new Map<string, number>();
     for (const t of tasks) {
@@ -814,6 +834,14 @@ export default function GanttClient({
   useEffect(() => {
     childCountByIdRef.current = childCountById;
   }, [childCountById]);
+
+  // Health rail lookup — see `healthById` above. Stored in a ref so the
+  // memoized TaskTemplate picks up server-side health updates without a full
+  // component reinstantiation.
+  const healthByIdRef = useRef(healthById);
+  useEffect(() => {
+    healthByIdRef.current = healthById;
+  }, [healthById]);
 
   // Row type (EPIC / TASK / ISSUE) by id. Read via a ref so every
   // task edit doesn't invalidate TaskTemplate.
@@ -1349,6 +1377,7 @@ export default function GanttClient({
     const id = data?.id != null ? String(data.id) : "";
     const level = Math.min(levelById.get(id) ?? 0, 2);
     const urgency = urgencyById.get(id) ?? data?.urgency ?? "medium";
+    const health = healthByIdRef.current.get(id);
     const pct = Math.max(0, Math.min(100, Number(data?.progress ?? 0)));
     const overdue = data?.end ? isOverdue(data.end, pct) : false;
     const childCount = childCountByIdRef.current.get(id) ?? 0;
@@ -1504,6 +1533,7 @@ export default function GanttClient({
           data-bar-id={id}
           className={
             `task-pill level-${level} urgency-${urgency}` +
+            (health ? ` task-pill--health-${health}` : "") +
             (isParentBar ? " task-pill--parent" : " task-pill--leaf") +
             (overdue ? " task-pill--overdue" : "") +
             (needsPlacement ? " task-pill--unplaced" : "")
@@ -1519,6 +1549,12 @@ export default function GanttClient({
             className="task-pill__fill"
             style={{ width: `${pct}%`, background: colors.fill }}
           />
+          {health ? (
+            <span
+              className={`task-pill__health-rail task-pill__health-rail--${health}`}
+              aria-hidden
+            />
+          ) : null}
           {hasChildBars ? (
             <button
               type="button"

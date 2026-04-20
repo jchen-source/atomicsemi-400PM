@@ -570,12 +570,17 @@ export default function GanttClient({
     const pct = Math.max(0, Math.min(100, Number(data?.progress ?? 0)));
     const overdue = data?.end ? isOverdue(data.end, pct) : false;
     const childCount = childCountByIdRef.current.get(id) ?? 0;
-    const isParentBar = childCount > 0;
+    // Color by hierarchy LEVEL, not "has children". Previously a
+    // workstream with no children rendered as a leaf (urgency-colored),
+    // so workstreams and tasks looked identical. Now programs + workstreams
+    // always read as summary bars and tasks always read with urgency, even
+    // when the workstream hasn't been filled out yet.
+    const isParentBar = level <= 1;
     const needsPlacement = needsPlacementIds.has(id);
-    // Tasks (leaves) show urgency to surface risk at a glance. Programs
-    // and workstreams (anything with children) switch to a muted
-    // slate/indigo "summary" palette so the hierarchy reads visually —
-    // parents look like groupings, not another individual task.
+    // Leaf tasks show urgency to surface risk at a glance. Programs
+    // and workstreams get a muted slate/indigo "summary" palette so the
+    // hierarchy reads visually — parents look like groupings regardless
+    // of whether children exist yet.
     const taskPalette: Record<
       "high" | "medium" | "low",
       { bg: string; border: string; text: string; fill: string }

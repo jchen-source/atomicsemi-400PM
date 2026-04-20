@@ -2227,23 +2227,35 @@ export default function GanttClient({
    */
   async function createMilestone(parentId: string | null) {
     if (addingTask) return;
+    const parent = parentId ? tasks.find((t) => t.id === parentId) : null;
+    // Prompt for a name up front — milestones are usually deliverables
+    // (e.g. "FAT complete", "Tapeout", "Power-on") that don't always
+    // share the parent workstream's name, so defaulting silently is
+    // wrong most of the time. Parent name is offered as a starting
+    // point; the user can clear it or replace entirely.
+    const suggested = parent ? `${parent.text} complete` : "New milestone";
+    const raw =
+      typeof window !== "undefined"
+        ? window.prompt("Milestone name", suggested)
+        : suggested;
+    if (raw === null) return; // user cancelled
+    const title = raw.trim() || suggested;
+
     setAddingTask(true);
     setStatus(
       parentId
         ? `Adding milestone at end of ${
-            tasks.find((t) => t.id === parentId)?.text ?? "parent"
+            parent?.text ?? "parent"
           }…`
         : "Adding milestone…",
     );
     try {
-      const parent = parentId ? tasks.find((t) => t.id === parentId) : null;
       const anchor = parent ? new Date(parent.end) : new Date();
       // Milestones are zero-duration: startDate === endDate. The backend
       // rollup already excludes MILESTONE from the parent's span, so
       // putting them on the parent's end date won't push the parent out.
       const date = new Date(anchor);
       date.setHours(12, 0, 0, 0);
-      const title = parent ? `${parent.text} complete` : "New milestone";
       const res = await fetch("/api/tasks", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -3148,9 +3160,16 @@ export default function GanttClient({
           title="Add a milestone. Right-click a workstream to attach one to its end date."
           disabled={addingTask}
         >
-          <span aria-hidden="true" style={{ marginRight: 4 }}>
-            ★
-          </span>
+          <svg
+            viewBox="0 0 24 24"
+            width="12"
+            height="12"
+            fill="currentColor"
+            aria-hidden="true"
+            style={{ marginRight: 5, verticalAlign: "-1px" }}
+          >
+            <path d="M12 1 Q12.55 11.45 23 12 Q12.55 12.55 12 23 Q11.45 12.55 1 12 Q11.45 11.45 12 1 Z" />
+          </svg>
           Milestone
         </button>
         <button
@@ -3414,7 +3433,7 @@ export default function GanttClient({
                     height="14"
                     fill="currentColor"
                   >
-                    <path d="M12 2.5 14.9 8.8 21.8 9.7 16.7 14.4 18 21.2 12 17.9 6 21.2 7.3 14.4 2.2 9.7 9.1 8.8z" />
+                    <path d="M12 1 Q12.55 11.45 23 12 Q12.55 12.55 12 23 Q11.45 12.55 1 12 Q11.45 11.45 12 1 Z" />
                   </svg>
                 </span>
                 Add milestone at end
@@ -3842,8 +3861,17 @@ function MilestoneBar({
         focusable="false"
         className="milestone-star__svg"
       >
+        {/* Four-point sparkle: each arm is a sharp cusp with deep
+            concave curves between it and its neighbors, matching the
+            "sparkle" glyph reference rather than a classic 5-point
+            star. Control points (≈11.4 / 12.6 around center 12) give
+            the thin pinched-in waist. */}
         <path
-          d="M12 2.5 14.9 8.8 21.8 9.7 16.7 14.4 18 21.2 12 17.9 6 21.2 7.3 14.4 2.2 9.7 9.1 8.8z"
+          d="M12 1
+             Q12.55 11.45 23 12
+             Q12.55 12.55 12 23
+             Q11.45 12.55 1 12
+             Q11.45 11.45 12 1 Z"
           className="milestone-star__glyph"
         />
       </svg>

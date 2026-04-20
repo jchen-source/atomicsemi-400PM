@@ -2241,8 +2241,9 @@
 .milestone-star__glyph {
   fill: #facc15;
   stroke: #b45309;
-  stroke-width: 1.1;
+  stroke-width: 0.6;
   stroke-linejoin: round;
+  stroke-linecap: round;
 }
 
 .milestone-star--done .milestone-star__glyph {

@@ -923,7 +923,7 @@ export default function GanttClient({
         while (cursor && !seen.has(cursor)) {
           seen.add(cursor);
           pathTasks.add(cursor);
-          const preds = predecessorsByTaskId.get(cursor) ?? [];
+          const preds: string[] = predecessorsByTaskId.get(cursor) ?? [];
           if (preds.length === 0) break;
           let bestPred: string | null = null;
           let bestEndMs = -Infinity;

@@ -1577,10 +1577,16 @@ export default function GanttClient({
       applyAffected(affected);
       markSaved();
       setStatus("");
-      // Resync server props so levelById / urgencyById / dep maps and
-      // parent rollups reflect this edit without a manual page refresh.
-      // Debounced so rapid edits across multiple cells coalesce.
-      scheduleServerSync();
+      // Intentionally do NOT call router.refresh() here. The server already
+      // returned the authoritative row + all affected rollups, and we just
+      // pushed them into SVAR's store directly. Triggering a Next.js
+      // route refresh on every cell edit caused the whole chart to flash
+      // and jump (the user sees it as "the entire webapp refreshes"),
+      // and it wasn't adding any data the user couldn't already see.
+      // Anything purely server-derived (e.g. other tasks' depsLabel text
+      // after a rename) will catch up on the next structural sync —
+      // dep add/delete, parent reassign, task add/delete, or the manual
+      // "Refresh" button.
     } catch (err) {
       console.error(err);
       setStatus("Save failed");

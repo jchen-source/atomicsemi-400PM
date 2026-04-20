@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import "@svar-ui/react-gantt/all.css";
@@ -150,6 +150,36 @@ export default function GanttClient({
   const [depEditorQuery, setDepEditorQuery] = useState("");
   const [depEditorSelected, setDepEditorSelected] = useState<string[]>([]);
   const [depEditorSaving, setDepEditorSaving] = useState(false);
+  // Parent-picker state: lets the user re-home any task under another
+  // task (or move it to top level) without dragging. An array because
+  // the picker also handles bulk moves (select many rows, then Move under
+  // parent… from the context menu or the hover icon).
+  const [parentEditorIds, setParentEditorIds] = useState<string[]>([]);
+  const [parentEditorQuery, setParentEditorQuery] = useState("");
+  const [parentEditorSaving, setParentEditorSaving] = useState(false);
+
+  // Multi-select: shift-click extends a contiguous range from the last
+  // anchor; cmd/ctrl-click toggles an individual row; plain click on the
+  // drag grip selects just that row. Selection drives bulk drag-to-reparent
+  // and bulk context-menu actions.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const selectedIdsRef = useRef(selectedIds);
+  useEffect(() => {
+    selectedIdsRef.current = selectedIds;
+  }, [selectedIds]);
+  const selectAnchorIdRef = useRef<string | null>(null);
+
+  // Floating right-click menu anchored at the cursor. `scope` captures
+  // the target row ids at open time so bulk actions keep working even if
+  // the user shifts the selection while the menu is mounted.
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    taskId: string;
+    scope: string[];
+  } | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   const [addingTask, setAddingTask] = useState(false);
   const [savedTick, setSavedTick] = useState(0);
@@ -277,6 +307,33 @@ export default function GanttClient({
     return map;
   }, [tasks]);
 
+  // DFS traversal of the tree in the order rows appear in the grid. We
+  // need this for shift-click range selection — the anchor row and the
+  // clicked row bracket a contiguous slice of this list.
+  const visualOrder = useMemo(() => {
+    const childrenOf = new Map<string | null, typeof tasks>();
+    for (const t of tasks) {
+      const key = t.parent ?? null;
+      const arr = childrenOf.get(key) ?? [];
+      arr.push(t);
+      childrenOf.set(key, arr);
+    }
+    const order: string[] = [];
+    const visit = (parent: string | null) => {
+      const kids = childrenOf.get(parent) ?? [];
+      for (const k of kids) {
+        order.push(k.id);
+        visit(k.id);
+      }
+    };
+    visit(null);
+    return order;
+  }, [tasks]);
+  const visualOrderRef = useRef(visualOrder);
+  useEffect(() => {
+    visualOrderRef.current = visualOrder;
+  }, [visualOrder]);
+
   // Mirror of `childCountById` held in a ref so memoized cell components
   // (EffortCell, DepsLabelCell, …) can read the current value without being
   // invalidated every time a single row changes.
@@ -364,29 +421,73 @@ export default function GanttClient({
       },
     };
     const colors = palette[urgency];
+    const label = data?.text ?? "";
+
+    // Detect when the bar is too narrow to show the full task name inside
+    // so we can spill the full text next to the bar instead of letting it
+    // truncate to a useless "Tool Deli…". Re-measured whenever the text
+    // changes or the bar resizes (zoom change, date drag, etc).
+    const nameRef = useRef<HTMLSpanElement | null>(null);
+    const pillRef = useRef<HTMLDivElement | null>(null);
+    const [clipped, setClipped] = useState(false);
+    useLayoutEffect(() => {
+      const nameEl = nameRef.current;
+      const pillEl = pillRef.current;
+      if (!nameEl || !pillEl) return;
+      const check = () => {
+        // Height-based check covers the -webkit-line-clamp truncation; width
+        // catches single-line names that horizontally overflow.
+        const truncated =
+          nameEl.scrollHeight > nameEl.clientHeight + 1 ||
+          nameEl.scrollWidth > nameEl.clientWidth + 1;
+        setClipped(truncated);
+      };
+      check();
+      const ro = new ResizeObserver(check);
+      ro.observe(nameEl);
+      ro.observe(pillEl);
+      return () => ro.disconnect();
+    }, [label, pct]);
+
     return (
-      <div
-        className={
-          `task-pill level-${level} urgency-${urgency}` +
-          (overdue ? " task-pill--overdue" : "")
-        }
-        style={{
-          pointerEvents: "none",
-          background: colors.bg,
-          borderColor: colors.border,
-          color: colors.text,
-        }}
-      >
+      <div className="task-pill-wrap">
         <div
-          className="task-pill__fill"
-          style={{ width: `${pct}%`, background: colors.fill }}
-        />
-        <div className="task-pill__text">
-          <span className="task-pill__name" title={data?.text ?? ""}>
-            {data?.text ?? ""}
-          </span>
-          <span className="task-pill__pct">{pct}%</span>
+          ref={pillRef}
+          className={
+            `task-pill level-${level} urgency-${urgency}` +
+            (overdue ? " task-pill--overdue" : "")
+          }
+          style={{
+            pointerEvents: "none",
+            background: colors.bg,
+            borderColor: colors.border,
+            color: colors.text,
+          }}
+        >
+          <div
+            className="task-pill__fill"
+            style={{ width: `${pct}%`, background: colors.fill }}
+          />
+          <div className="task-pill__text">
+            <span
+              className="task-pill__name"
+              ref={nameRef}
+              title={label}
+            >
+              {label}
+            </span>
+            <span className="task-pill__pct">{pct}%</span>
+          </div>
         </div>
+        {clipped && label && (
+          <span
+            className={`task-pill__overflow-label urgency-${urgency}`}
+            style={{ color: colors.text }}
+            aria-hidden="true"
+          >
+            {label}
+          </span>
+        )}
       </div>
     );
   };
@@ -875,6 +976,29 @@ export default function GanttClient({
             )}
           </span>
           <span className="task-row-actions" data-row-actions>
+            <button
+              className="task-row-icon-btn"
+              data-assign-parent={id}
+              title="Move under another task"
+              aria-label="Move under another task"
+              type="button"
+            >
+              {/* Folder/tree icon — represents nesting under a parent. */}
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                <path d="M8 13h8" />
+              </svg>
+            </button>
             <button
               className="task-row-icon-btn"
               data-deps-edit={id}
@@ -1430,50 +1554,114 @@ export default function GanttClient({
     }
   }
 
-  async function reparentTask(
-    childId: string,
+  async function reparentTasks(
+    childIds: string[],
     newParentId: string | null,
   ) {
-    const child = tasks.find((t) => t.id === childId);
-    if (!child) return;
-    if (childId === newParentId) return;
-    if (child.parent === newParentId) return;
+    const byId = new Map(tasks.map((t) => [t.id, t]));
 
-    // Prevent cycles: walk up from newParentId and ensure we never hit childId.
-    if (newParentId) {
-      const byId = new Map(tasks.map((t) => [t.id, t]));
-      let cursor: string | null | undefined = newParentId;
-      const seen = new Set<string>();
-      while (cursor) {
-        if (cursor === childId) {
-          setStatus("Can't nest a task under its own descendant.");
-          setTimeout(() => setStatus(""), 2000);
-          return;
+    // Prevent cycles and no-ops: drop tasks that would either be moved
+    // under themselves, a descendant of themselves, or already have the
+    // desired parent.
+    const valid: string[] = [];
+    for (const childId of childIds) {
+      const child = byId.get(childId);
+      if (!child) continue;
+      if (childId === newParentId) continue;
+      if ((child.parent ?? null) === newParentId) continue;
+      if (newParentId) {
+        let cursor: string | null | undefined = newParentId;
+        const seen = new Set<string>();
+        let cyclic = false;
+        while (cursor) {
+          if (cursor === childId) {
+            cyclic = true;
+            break;
+          }
+          if (seen.has(cursor)) break;
+          seen.add(cursor);
+          cursor = byId.get(cursor)?.parent ?? null;
         }
-        if (seen.has(cursor)) break;
-        seen.add(cursor);
-        cursor = byId.get(cursor)?.parent ?? null;
+        if (cyclic) continue;
       }
+      valid.push(childId);
     }
 
-    const targetName =
-      newParentId
-        ? (tasks.find((t) => t.id === newParentId)?.text ?? "parent")
-        : "top level";
-    setStatus(`Moving "${child.text}" under ${targetName}…`);
+    if (valid.length === 0) {
+      setStatus("Nothing to move.");
+      setTimeout(() => setStatus(""), 1500);
+      return;
+    }
+
+    const targetName = newParentId
+      ? (byId.get(newParentId)?.text ?? "parent")
+      : "top level";
+    setStatus(
+      valid.length === 1
+        ? `Moving "${byId.get(valid[0])?.text ?? "task"}" under ${targetName}…`
+        : `Moving ${valid.length} tasks under ${targetName}…`,
+    );
     try {
-      const res = await fetch(`/api/tasks/${childId}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ parentId: newParentId }),
-      });
-      if (!res.ok) throw new Error(await res.text());
+      await Promise.all(
+        valid.map((id) =>
+          fetch(`/api/tasks/${id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ parentId: newParentId }),
+          }).then(async (r) => {
+            if (!r.ok) throw new Error(await r.text());
+          }),
+        ),
+      );
       markSaved();
-      setStatus(`Moved under ${targetName}.`);
+      setStatus(
+        valid.length === 1
+          ? `Moved under ${targetName}.`
+          : `Moved ${valid.length} tasks under ${targetName}.`,
+      );
       router.refresh();
       setTimeout(() => setStatus(""), 1500);
     } catch (e: unknown) {
       setStatus(e instanceof Error ? e.message : "Move failed");
+    }
+  }
+
+  function reparentTask(childId: string, newParentId: string | null) {
+    return reparentTasks([childId], newParentId);
+  }
+
+  async function createChildTask(parentId: string) {
+    if (addingTask) return;
+    setAddingTask(true);
+    setStatus("Adding child task…");
+    const start = new Date();
+    const end = new Date(start.getTime() + 1000 * 60 * 60 * 24 * 7);
+    try {
+      const res = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "New Task",
+          description: "",
+          type: "TASK",
+          status: "TODO",
+          parentId,
+          startDate: start,
+          endDate: end,
+          progress: 0,
+          sortOrder: 9999,
+          tags: [],
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      markSaved();
+      setStatus("Child task added.");
+      router.refresh();
+      setTimeout(() => setStatus(""), 1400);
+    } catch (e: unknown) {
+      setStatus(e instanceof Error ? e.message : "Create task failed");
+    } finally {
+      setAddingTask(false);
     }
   }
 
@@ -1520,6 +1708,25 @@ export default function GanttClient({
     setDepEditorSelected([...(depsByDependent.get(taskId) ?? [])]);
   }
 
+  function openParentEditor(taskIds: string | string[]) {
+    const ids = Array.isArray(taskIds) ? taskIds : [taskIds];
+    if (ids.length === 0) return;
+    setParentEditorIds(ids);
+    setParentEditorQuery("");
+  }
+
+  async function saveParentEditor(nextParentId: string | null) {
+    const ids = parentEditorIds;
+    if (ids.length === 0) return;
+    setParentEditorSaving(true);
+    try {
+      await reparentTasks(ids, nextParentId);
+      setParentEditorIds([]);
+    } finally {
+      setParentEditorSaving(false);
+    }
+  }
+
   useEffect(() => {
     const root = frameRef.current;
     if (!root) return;
@@ -1541,6 +1748,16 @@ export default function GanttClient({
         if (id) openDependencyEditor(id);
         return;
       }
+      const parentBtn = target?.closest(
+        "[data-assign-parent]",
+      ) as HTMLElement | null;
+      if (parentBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const id = parentBtn.getAttribute("data-assign-parent");
+        if (id) openParentEditor(id);
+        return;
+      }
       const depCell = target?.closest(
         "[data-deps-cell-edit]",
       ) as HTMLElement | null;
@@ -1549,13 +1766,97 @@ export default function GanttClient({
         ev.stopPropagation();
         const id = depCell.getAttribute("data-deps-cell-edit");
         if (id) openDependencyEditor(id);
+        return;
       }
+
+      // Selection: modifier-click selects rows for bulk drag / bulk
+      // context-menu actions. We explicitly avoid activating on inline
+      // edit inputs, action buttons (handled above), and anywhere outside
+      // a task row — those either bubble to existing handlers or clear
+      // the selection at the end of this function.
+      const row = target?.closest("[data-task-drag-id]") as HTMLElement | null;
+      const onInlineInput = !!target?.closest(".inline-edit-input");
+      const onGrip = !!target?.closest("[data-task-drag-handle]");
+      const hasModifier = ev.shiftKey || ev.metaKey || ev.ctrlKey;
+
+      if (row && (hasModifier || onGrip)) {
+        // Eat the click so inline-edit mode doesn't engage on the task name.
+        ev.preventDefault();
+        ev.stopPropagation();
+        const id = row.getAttribute("data-task-drag-id");
+        if (!id) return;
+        if (ev.shiftKey) {
+          const anchor = selectAnchorIdRef.current;
+          const order = visualOrderRef.current;
+          if (!anchor) {
+            selectAnchorIdRef.current = id;
+            setSelectedIds(new Set([id]));
+          } else {
+            const i = order.indexOf(anchor);
+            const j = order.indexOf(id);
+            if (i === -1 || j === -1) {
+              selectAnchorIdRef.current = id;
+              setSelectedIds(new Set([id]));
+            } else {
+              const [lo, hi] = i < j ? [i, j] : [j, i];
+              setSelectedIds(new Set(order.slice(lo, hi + 1)));
+            }
+          }
+        } else if (ev.metaKey || ev.ctrlKey) {
+          selectAnchorIdRef.current = id;
+          setSelectedIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+          });
+        } else {
+          // Plain click on the drag grip: select just this row.
+          selectAnchorIdRef.current = id;
+          setSelectedIds(new Set([id]));
+        }
+        return;
+      }
+
+      // Click landed outside a task row (e.g. blank toolbar area). If it
+      // wasn't inside an input, clear the selection so it doesn't linger.
+      if (!row && !onInlineInput && selectedIdsRef.current.size > 0) {
+        setSelectedIds(new Set());
+        selectAnchorIdRef.current = null;
+      }
+    };
+
+    // Right-click on any task row opens a small floating action menu.
+    // When the clicked row is already part of the selection, the menu's
+    // actions apply to the whole selection (bulk move / bulk delete).
+    // Otherwise it scopes to just this one row and selects it so the
+    // visual highlight matches what the menu will act on.
+    const onContextMenu = (ev: MouseEvent) => {
+      const wrap = (ev.target as HTMLElement | null)?.closest(
+        "[data-task-drag-id]",
+      ) as HTMLElement | null;
+      if (!wrap) return;
+      const id = wrap.getAttribute("data-task-drag-id");
+      if (!id) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const currentSel = selectedIdsRef.current;
+      let scope: string[];
+      if (currentSel.has(id) && currentSel.size > 1) {
+        scope = Array.from(currentSel);
+      } else {
+        scope = [id];
+        selectAnchorIdRef.current = id;
+        setSelectedIds(new Set([id]));
+      }
+      setContextMenu({ x: ev.clientX, y: ev.clientY, taskId: id, scope });
     };
 
     // HTML5 drag-and-drop for reparenting: drag any task cell onto another
     // task cell to make the dragged task a child of the drop target.
     const DRAG_MIME = "application/x-pm-task-id";
     let dragSourceId: string | null = null;
+    let dragIds: string[] = [];
 
     const clearDropHover = () => {
       root
@@ -1576,14 +1877,34 @@ export default function GanttClient({
       // never sees the event. Without this our drag-to-reparent no-ops.
       ev.stopPropagation();
       dragSourceId = id;
+
+      // If the dragged row is part of a multi-row selection, the drop
+      // reparents every selected row at once. Otherwise only the grabbed
+      // row moves (even if the user had some unrelated selection).
+      const sel = selectedIdsRef.current;
+      if (sel.has(id) && sel.size > 1) {
+        dragIds = Array.from(sel);
+      } else {
+        dragIds = [id];
+      }
+
       ev.dataTransfer.effectAllowed = "move";
-      ev.dataTransfer.setData(DRAG_MIME, id);
+      ev.dataTransfer.setData(DRAG_MIME, dragIds.join(","));
       ev.dataTransfer.setData("text/plain", id);
-      src.classList.add("task-cell-wrap--dragging");
+
+      // Paint all rows that are part of this drag so the user sees the
+      // full scope lifting together, not just the grabbed one.
+      for (const movingId of dragIds) {
+        const el = root.querySelector<HTMLElement>(
+          `[data-task-drag-id="${CSS.escape(movingId)}"]`,
+        );
+        el?.classList.add("task-cell-wrap--dragging");
+      }
     };
 
     const onDragEnd = () => {
       dragSourceId = null;
+      dragIds = [];
       clearDropHover();
       root
         .querySelectorAll<HTMLElement>(".task-cell-wrap--dragging")
@@ -1596,7 +1917,10 @@ export default function GanttClient({
       ) as HTMLElement | null;
       if (!wrap) return;
       const dropId = wrap.getAttribute("data-task-drop-id");
-      if (!dropId || dropId === dragSourceId) return;
+      if (!dropId) return;
+      // Can't drop onto any of the rows we're currently dragging.
+      if (dragIds.length > 0 && dragIds.includes(dropId)) return;
+      if (dropId === dragSourceId) return;
       ev.preventDefault();
       if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
       if (!wrap.classList.contains("task-cell-wrap--drop-target")) {
@@ -1618,15 +1942,23 @@ export default function GanttClient({
       ) as HTMLElement | null;
       if (!wrap) return;
       const dropId = wrap.getAttribute("data-task-drop-id");
-      const sourceId =
-        ev.dataTransfer?.getData(DRAG_MIME) ||
-        ev.dataTransfer?.getData("text/plain") ||
-        dragSourceId;
       clearDropHover();
-      if (!dropId || !sourceId || dropId === sourceId) return;
+      if (!dropId) return;
+
+      // Prefer the batch payload; fall back to legacy single-id channel.
+      const raw = ev.dataTransfer?.getData(DRAG_MIME) ?? "";
+      const batch = raw
+        ? raw.split(",").filter(Boolean)
+        : dragIds.length > 0
+          ? dragIds
+          : dragSourceId
+            ? [dragSourceId]
+            : [];
+      if (batch.length === 0) return;
+      if (batch.includes(dropId)) return;
       ev.preventDefault();
       ev.stopPropagation();
-      void reparentTask(sourceId, dropId);
+      void reparentTasks(batch, dropId);
     };
 
     // SVAR attaches a container-level mousedown listener that boots its own
@@ -1654,6 +1986,9 @@ export default function GanttClient({
     root.addEventListener("dragover", onDragOver);
     root.addEventListener("dragleave", onDragLeave);
     root.addEventListener("drop", onDrop);
+    // Capture phase so we reach the event before SVAR's internal handlers,
+    // which otherwise swallow the contextmenu.
+    root.addEventListener("contextmenu", onContextMenu, true);
     return () => {
       root.removeEventListener("click", onClick);
       root.removeEventListener("mousedown", onMouseDownCapture, true);
@@ -1662,9 +1997,55 @@ export default function GanttClient({
       root.removeEventListener("dragover", onDragOver);
       root.removeEventListener("dragleave", onDragLeave);
       root.removeEventListener("drop", onDrop);
+      root.removeEventListener("contextmenu", onContextMenu, true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasks, depsByDependent]);
+
+  // Paint the visual selection directly on the DOM. We deliberately
+  // don't thread `selectedIds` through the memoized cell components —
+  // that would invalidate them on every click and force SVAR to rebuild
+  // the grid. A simple classList pass over existing rows is cheaper
+  // and keeps the cells referentially stable.
+  useEffect(() => {
+    const root = frameRef.current;
+    if (!root) return;
+    const rows = root.querySelectorAll<HTMLElement>("[data-task-drag-id]");
+    rows.forEach((el) => {
+      const id = el.getAttribute("data-task-drag-id");
+      if (!id) return;
+      if (selectedIds.has(id)) {
+        el.classList.add("task-cell-wrap--selected");
+      } else {
+        el.classList.remove("task-cell-wrap--selected");
+      }
+    });
+  }, [selectedIds, tasks]);
+
+  // Dismiss the context menu on any outside click, escape, or scroll.
+  // We rely on a window-level listener because the menu floats above
+  // the Gantt frame, and we want it to dismiss regardless of what the
+  // user clicks next.
+  useEffect(() => {
+    if (!contextMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setContextMenu(null);
+    };
+    const onWindowClick = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest("[data-task-context-menu]")) return;
+      setContextMenu(null);
+    };
+    const onScroll = () => setContextMenu(null);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onWindowClick);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onWindowClick);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [contextMenu]);
 
   async function saveDependencyEditor() {
     if (!depEditorTaskId) return;
@@ -1881,6 +2262,133 @@ export default function GanttClient({
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {parentEditorIds.length > 0 && (
+        <ParentPicker
+          scopeIds={parentEditorIds}
+          tasks={tasks}
+          query={parentEditorQuery}
+          setQuery={setParentEditorQuery}
+          saving={parentEditorSaving}
+          onCancel={() => setParentEditorIds([])}
+          onSave={saveParentEditor}
+          levelForRow={levelForRow}
+          depthById={depthById}
+          childCountById={childCountById}
+        />
+      )}
+
+      {contextMenu && (
+        <div
+          className="task-context-menu"
+          data-task-context-menu
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          role="menu"
+          onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <div className="task-context-header">
+            {contextMenu.scope.length > 1
+              ? `${contextMenu.scope.length} tasks selected`
+              : (tasks.find((t) => t.id === contextMenu.taskId)?.text ??
+                "Task")}
+          </div>
+          {contextMenu.scope.length === 1 && (
+            <button
+              type="button"
+              className="task-context-item"
+              onClick={() => {
+                const id = contextMenu.taskId;
+                setContextMenu(null);
+                void createChildTask(id);
+              }}
+            >
+              <span className="task-context-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  width="14"
+                  height="14"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </span>
+              Add child task
+            </button>
+          )}
+          <button
+            type="button"
+            className="task-context-item"
+            onClick={() => {
+              const scope = contextMenu.scope;
+              setContextMenu(null);
+              openParentEditor(scope);
+            }}
+          >
+            <span className="task-context-icon" aria-hidden="true">
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                <path d="M8 13h8" />
+              </svg>
+            </span>
+            {contextMenu.scope.length > 1
+              ? `Move ${contextMenu.scope.length} tasks under parent…`
+              : "Move under parent…"}
+          </button>
+          <div className="task-context-sep" />
+          <button
+            type="button"
+            className="task-context-item task-context-item--danger"
+            onClick={() => {
+              const scope = contextMenu.scope;
+              setContextMenu(null);
+              if (scope.length === 1) {
+                deleteTaskById(scope[0]);
+                return;
+              }
+              const ok = window.confirm(
+                `Delete ${scope.length} tasks (and everything nested under them)?`,
+              );
+              if (!ok) return;
+              setSelectedIds(new Set());
+              void Promise.all(
+                scope.map((id) => deleteTaskRequest(id, "cascade")),
+              );
+            }}
+          >
+            <span className="task-context-icon" aria-hidden="true">
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+              </svg>
+            </span>
+            {contextMenu.scope.length > 1
+              ? `Delete ${contextMenu.scope.length} tasks`
+              : "Delete task"}
+          </button>
         </div>
       )}
     </div>
@@ -2202,6 +2710,282 @@ function shortDate(d: Date) {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
+}
+
+function ParentPicker({
+  scopeIds,
+  tasks,
+  query,
+  setQuery,
+  saving,
+  onCancel,
+  onSave,
+  levelForRow,
+  depthById,
+  childCountById,
+}: {
+  scopeIds: string[];
+  tasks: GanttTaskInput[];
+  query: string;
+  setQuery: (q: string) => void;
+  saving: boolean;
+  onCancel: () => void;
+  onSave: (nextParentId: string | null) => void;
+  levelForRow: (
+    rowType: string,
+    depth: number,
+    childCount: number,
+  ) => {
+    slug: string;
+    label: string;
+    title: string;
+    showChip: boolean;
+  };
+  depthById: Map<string, number>;
+  childCountById: Map<string, number>;
+}) {
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  useEffect(() => {
+    searchRef.current?.focus();
+  }, []);
+
+  const scopeSet = useMemo(() => new Set(scopeIds), [scopeIds]);
+
+  // Forbid moving a task under itself or any of its descendants — that
+  // would create a cycle. Precompute the union of descendants of every
+  // task in scope.
+  const forbiddenSet = useMemo(() => {
+    const childrenOf = new Map<string, GanttTaskInput[]>();
+    for (const t of tasks) {
+      if (!t.parent) continue;
+      const arr = childrenOf.get(t.parent) ?? [];
+      arr.push(t);
+      childrenOf.set(t.parent, arr);
+    }
+    const forbidden = new Set<string>(scopeIds);
+    const walk = (id: string) => {
+      const kids = childrenOf.get(id) ?? [];
+      for (const k of kids) {
+        if (forbidden.has(k.id)) continue;
+        forbidden.add(k.id);
+        walk(k.id);
+      }
+    };
+    for (const id of scopeIds) walk(id);
+    return forbidden;
+  }, [tasks, scopeIds]);
+
+  const candidates = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return tasks.filter((t) => {
+      if (t.rowType === "ISSUE") return false;
+      if (forbiddenSet.has(t.id)) return false;
+      if (!q) return true;
+      return t.text.toLowerCase().includes(q);
+    });
+  }, [tasks, forbiddenSet, query]);
+
+  // Everything the picker can pick, including the synthetic "Top level"
+  // entry at index 0. Keyboard nav treats the combined list as one.
+  const totalCount = candidates.length + 1;
+
+  const currentParents = useMemo(() => {
+    const set = new Set<string | null>();
+    for (const id of scopeIds) {
+      const t = tasks.find((x) => x.id === id);
+      set.add(t?.parent ?? null);
+    }
+    return set;
+  }, [scopeIds, tasks]);
+  const sameParentForAll = currentParents.size === 1;
+
+  function commit(nextParentId: string | null) {
+    onSave(nextParentId);
+  }
+
+  function onSearchKeyDown(ev: React.KeyboardEvent<HTMLInputElement>) {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      onCancel();
+      return;
+    }
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      setActiveIndex((i) => Math.min(i + 1, Math.max(0, totalCount - 1)));
+      return;
+    }
+    if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      setActiveIndex((i) => Math.max(0, i - 1));
+      return;
+    }
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      if (activeIndex === 0) {
+        commit(null);
+      } else {
+        const t = candidates[activeIndex - 1];
+        if (t) commit(t.id);
+      }
+    }
+  }
+
+  const scopeLabel =
+    scopeIds.length === 1
+      ? (tasks.find((t) => t.id === scopeIds[0])?.text ?? "this task")
+      : `${scopeIds.length} tasks`;
+
+  return (
+    <div
+      className="deps-modal-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onCancel();
+      }}
+    >
+      <div
+        className="deps-modal deps-picker parent-picker"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="parent-picker-title"
+      >
+        <div className="deps-picker-header">
+          <div className="deps-picker-title-block">
+            <h3 className="deps-modal-title" id="parent-picker-title">
+              Move under parent
+            </h3>
+            <p className="deps-modal-subtitle">
+              Pick a new parent for <strong>{scopeLabel}</strong>, or promote
+              {scopeIds.length > 1 ? " them " : " it "}
+              back to the top level. Tasks can&apos;t be moved under themselves
+              or any of their descendants.
+            </p>
+          </div>
+          <span className="deps-picker-count">
+            {scopeIds.length} selected
+          </span>
+        </div>
+
+        <div className="deps-picker-combo">
+          <input
+            ref={searchRef}
+            className="deps-picker-search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onSearchKeyDown}
+            placeholder="Search for a parent task…"
+          />
+        </div>
+
+        <div className="deps-picker-list">
+          {/* Always-visible synthetic option: move to top level. */}
+          <button
+            type="button"
+            className={
+              "deps-picker-item" +
+              (activeIndex === 0 ? " deps-picker-item--active" : "") +
+              (sameParentForAll && currentParents.has(null)
+                ? " deps-picker-item--checked"
+                : "")
+            }
+            onMouseEnter={() => setActiveIndex(0)}
+            onClick={() => commit(null)}
+          >
+            <span className="deps-picker-item-check" aria-hidden="true">
+              <svg
+                viewBox="0 0 24 24"
+                width="12"
+                height="12"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M3 12h18M3 6h18M3 18h18" />
+              </svg>
+            </span>
+            <span className="task-row-kind task-row-kind--program">Top</span>
+            <span className="deps-picker-item-text">
+              Move to top level (no parent)
+            </span>
+          </button>
+
+          {candidates.length === 0 && (
+            <div className="deps-picker-empty">
+              {query
+                ? `No tasks match "${query}".`
+                : "No eligible parent tasks."}
+            </div>
+          )}
+          {candidates.map((t, idx) => {
+            const menuIdx = idx + 1;
+            const isActive = menuIdx === activeIndex;
+            const depth = depthById.get(t.id) ?? 0;
+            const childCount = childCountById.get(t.id) ?? 0;
+            const level = levelForRow(t.rowType, depth, childCount);
+            const isCurrent =
+              sameParentForAll && currentParents.has(t.id);
+            return (
+              <button
+                key={t.id}
+                type="button"
+                className={
+                  "deps-picker-item" +
+                  (isCurrent ? " deps-picker-item--checked" : "") +
+                  (isActive ? " deps-picker-item--active" : "")
+                }
+                onMouseEnter={() => setActiveIndex(menuIdx)}
+                onClick={() => commit(t.id)}
+              >
+                <span className="deps-picker-item-check" aria-hidden="true">
+                  {isCurrent ? (
+                    <svg
+                      viewBox="0 0 24 24"
+                      width="12"
+                      height="12"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="3"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  ) : null}
+                </span>
+                {level.showChip && (
+                  <span
+                    className={`task-row-kind task-row-kind--${level.slug}`}
+                    title={level.title}
+                  >
+                    {level.label}
+                  </span>
+                )}
+                <span className="deps-picker-item-text">{t.text}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="deps-picker-footer">
+          <span className="deps-picker-hint">
+            Enter selects. Esc cancels.
+          </span>
+          <div className="deps-modal-actions">
+            <button
+              className="gantt-linkmode-btn"
+              onClick={onCancel}
+              disabled={saving}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // Cached offscreen canvas for text width measurement. The Task column

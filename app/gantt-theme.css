@@ -253,20 +253,20 @@
   min-width: max-content;
 }
 
-/* Force vertical scrolling to work inside the Gantt panel. */
+/* Vertical scrolling is intentionally left to SVAR's own root element
+   (`.wx-gantt`) which has an onScroll handler that syncs the left table
+   and right timeline together. Previously we forced `overflow-y: auto`
+   on both `.wx-table-container` and `.wx-chart`, which gave each pane
+   its own independent scrollbar — and because the browser's scroll
+   event doesn't bubble, SVAR's sync handler never fired. The two panes
+   drifted out of alignment as the user scrolled. Only horizontal
+   overflow needs a nudge here (timeline width can exceed viewport). */
 .gantt-frame [class*="wx-table-container"] {
   overflow-x: auto !important;
-  overflow-y: auto !important;
 }
 
 .gantt-frame [class*="wx-chart"] {
   overflow-x: auto !important;
-  overflow-y: auto !important;
-}
-
-.gantt-frame [class*="wx-area"] {
-  overflow-x: auto !important;
-  overflow-y: visible !important;
 }
 
 .gantt-frame .wx-line {
@@ -396,6 +396,33 @@
   opacity: 1 !important;
 }
 
+/* Template root. Must NOT clip, otherwise the out-of-bar overflow label
+   would be cut at the edge of the bar itself. The inner .task-pill keeps
+   overflow:hidden for the progress fill + clipped text. */
+.task-pill-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  /* Give our absolutely-positioned overflow label a stacking context so
+     it floats above adjacent bars rather than hiding behind them. */
+  z-index: 1;
+}
+
+/* SVAR wraps taskTemplate in `.wx-bar .wx-content` with overflow:hidden
+   and text-overflow:ellipsis, which would clip the spill-over label.
+   Relax those two properties so the external label can escape the bar,
+   and also soften `.wx-bars` so labels aren't cropped at the timeline
+   edge when a bar sits near the right side of the chart. */
+.gantt-frame .wx-bar .wx-content {
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: normal !important;
+}
+
+.gantt-frame .wx-bars {
+  overflow: visible !important;
+}
+
 .task-pill {
   position: relative;
   width: 100%;
@@ -405,6 +432,45 @@
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid transparent;
+}
+
+/* External label shown only when the name couldn't fit inside the bar.
+   Positioned just past the bar's right edge, vertically centered, and
+   given a subtle pill background so it reads cleanly against the grid. */
+.task-pill__overflow-label {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  pointer-events: none;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  z-index: 2;
+}
+
+.task-pill__overflow-label.urgency-high {
+  background: #fff5f5;
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.task-pill__overflow-label.urgency-medium {
+  background: #fffbeb;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.task-pill__overflow-label.urgency-low {
+  background: #f0fdf4;
+  border-color: rgba(74, 222, 128, 0.4);
 }
 
 .task-pill::before {
@@ -710,6 +776,111 @@
   outline: 2px solid rgba(59, 130, 246, 0.55);
   outline-offset: -2px;
   border-radius: 6px;
+}
+
+/* Multi-select highlight for shift/cmd-click selections. Tuned to sit
+   above zebra striping and row hover but below the drop-target outline
+   so drag feedback still pops during a drop. */
+.task-cell-wrap--selected {
+  background: rgba(79, 70, 229, 0.08);
+  box-shadow: inset 2px 0 0 #4f46e5;
+  border-radius: 6px;
+}
+
+.task-cell-wrap--selected .task-row-kind {
+  background: rgba(79, 70, 229, 0.14);
+  color: #4338ca;
+}
+
+/* Floating right-click menu. Rendered inside the gantt-client JSX at
+   document flow, positioned with left/top from the cursor. */
+.task-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 220px;
+  padding: 4px;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 10px;
+  box-shadow:
+    0 10px 30px -8px rgba(15, 23, 42, 0.22),
+    0 4px 10px -4px rgba(15, 23, 42, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 13px;
+}
+
+.task-context-header {
+  padding: 6px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+.task-context-sep {
+  height: 1px;
+  margin: 3px 4px;
+  background: rgba(15, 23, 42, 0.08);
+}
+
+.task-context-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: #0f172a;
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1.2;
+}
+
+.task-context-item:hover,
+.task-context-item:focus-visible {
+  background: rgba(79, 70, 229, 0.08);
+  outline: none;
+}
+
+.task-context-item--danger {
+  color: #b91c1c;
+}
+
+.task-context-item--danger:hover,
+.task-context-item--danger:focus-visible {
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.task-context-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  color: #64748b;
+}
+
+.task-context-item--danger .task-context-icon {
+  color: #dc2626;
+}
+
+/* Parent picker inherits most of the deps-picker styling; these are the
+   tweaks that make it feel right for a single-select move action. */
+.parent-picker .deps-picker-list {
+  max-height: 340px;
+}
+
+.parent-picker .deps-picker-item--checked {
+  background: rgba(79, 70, 229, 0.08);
+  border-color: rgba(79, 70, 229, 0.4);
 }
 
 .deps-cell {

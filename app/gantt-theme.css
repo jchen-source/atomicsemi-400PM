@@ -389,6 +389,19 @@
   overflow-x: auto !important;
 }
 
+/* "Hide table" mode: collapses SVAR's left pane so the timeline spans
+   the whole frame. We don't touch the `columns` prop (which would
+   re-init SVAR and lose scroll position / opened rows) — we just clip
+   the left pane to zero width and let the chart flex-grow to fill. */
+.gantt-frame--chart-only [class*="wx-table-container"] {
+  display: none !important;
+}
+
+.gantt-frame--chart-only [class*="wx-chart"] {
+  flex: 1 1 100% !important;
+  width: 100% !important;
+}
+
 .gantt-frame .wx-line {
   stroke: #7c67d9 !important;
   stroke-width: 2.2 !important;

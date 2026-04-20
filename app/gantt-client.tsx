@@ -311,6 +311,12 @@ export default function GanttClient({
   >(null);
   const [savedTick, setSavedTick] = useState(0);
 
+  // Full-chart mode: hides the left-side task table so the timeline
+  // gets the whole frame. Purely a CSS toggle on the frame wrapper —
+  // doesn't touch SVAR's columns prop, so we avoid re-initializing the
+  // chart and losing user state (scroll position, opened rows, etc).
+  const [chartOnly, setChartOnly] = useState(false);
+
   // Task search. `searchOpen` toggles the inline input in the toolbar;
   // `searchQuery` is the live text. Matches are applied to rows via a
   // DOM effect so we don't have to rebuild the tasks array (which would
@@ -3141,26 +3147,36 @@ export default function GanttClient({
 
   /**
    * Expand / collapse every parent row (anything with children) via SVAR's
-   * internal open-task / close-task actions. We iterate only the actual
-   * parent ids instead of calling it blindly on every task, both for
-   * performance and because calling open-task on a leaf is a no-op but
-   * still triggers a store update.
+   * `open-task` action. SVAR doesn't expose a "close-task" action —
+   * instead, `open-task` takes `{ id, mode }` where `mode: true` opens
+   * and `mode: false` closes. We iterate only the actual parent ids
+   * (those with children) both for performance and to avoid bumping
+   * SVAR's store with no-op updates on leaf rows.
    */
   function setAllExpanded(expanded: boolean) {
     const api = apiRef.current;
-    if (!api) return;
-    const action = expanded ? "open-task" : "close-task";
+    if (!api) {
+      setStatus("Chart not ready yet.");
+      setTimeout(() => setStatus(""), 1200);
+      return;
+    }
+    let touched = 0;
     for (const t of tasks) {
       const kids = childCountByIdRef.current.get(t.id) ?? 0;
       if (kids <= 0) continue;
       try {
-        api.exec(action, { id: t.id });
+        api.exec("open-task", { id: t.id, mode: expanded });
+        touched++;
       } catch {
-        /* older SVAR versions might not accept this action for some rows */
+        /* some rows may not be openable (milestones, leaves) */
       }
     }
-    setStatus(expanded ? "Expanded all." : "Collapsed all.");
-    setTimeout(() => setStatus(""), 1000);
+    setStatus(
+      expanded
+        ? `Expanded ${touched} parent${touched === 1 ? "" : "s"}.`
+        : `Collapsed ${touched} parent${touched === 1 ? "" : "s"}.`,
+    );
+    setTimeout(() => setStatus(""), 1200);
   }
 
   // Compute the set of task ids relevant to the current search query.
@@ -3493,6 +3509,46 @@ export default function GanttClient({
           </svg>
           Collapse all
         </button>
+        <button
+          type="button"
+          onClick={() => setChartOnly((v) => !v)}
+          className={
+            "gantt-linkmode-btn" + (chartOnly ? " is-active" : "")
+          }
+          title={
+            chartOnly
+              ? "Show the task table again"
+              : "Hide the task table and give the timeline the full width"
+          }
+          aria-pressed={chartOnly}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="13"
+            height="13"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{ marginRight: 5, verticalAlign: "-1px" }}
+          >
+            {chartOnly ? (
+              <>
+                {/* Two panes icon — clicking returns the table. */}
+                <rect x="3" y="4" width="7" height="16" rx="1.5" />
+                <rect x="13" y="4" width="8" height="16" rx="1.5" />
+              </>
+            ) : (
+              <>
+                {/* Single wide pane icon — clicking hides the table. */}
+                <rect x="3" y="4" width="18" height="16" rx="1.5" />
+                <path d="M8 9h9M8 13h9M8 17h6" />
+              </>
+            )}
+          </svg>
+          {chartOnly ? "Show table" : "Hide table"}
+        </button>
         <div className="gantt-controls-divider" aria-hidden />
         <button
           type="button"
@@ -3566,7 +3622,10 @@ export default function GanttClient({
         </div>
       </div>
 
-      <div className="gantt-frame" ref={frameRef}>
+      <div
+        className={"gantt-frame" + (chartOnly ? " gantt-frame--chart-only" : "")}
+        ref={frameRef}
+      >
         {tasks.length === 0 && emptyState ? (
           <div className="gantt-empty-overlay">{emptyState}</div>
         ) : (

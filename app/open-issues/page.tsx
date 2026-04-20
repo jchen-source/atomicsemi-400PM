@@ -58,6 +58,7 @@ export default async function OpenIssuesPage() {
         title: i.title,
         status: toStatus(i.status),
         assignee: i.assignee,
+        originalResolutionDate: i.startDate.toISOString(),
         expectedResolutionDate: i.endDate.toISOString(),
         linkedTaskId: i.parentId,
         linkedTaskTitle: i.parentId ? byId.get(i.parentId)?.title ?? null : null,

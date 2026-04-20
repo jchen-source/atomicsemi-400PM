@@ -9,6 +9,9 @@ type OpenIssue = {
   title: string;
   status: Status;
   assignee: string | null;
+  /** First-committed target date, captured when the issue was created. */
+  originalResolutionDate: string;
+  /** Current target date. May slip out (or in) relative to original. */
   expectedResolutionDate: string;
   linkedTaskId: string | null;
   linkedTaskTitle: string | null;
@@ -89,7 +92,9 @@ export default function OpenIssuesClient({
           description: "",
           type: "ISSUE",
           status: "TODO",
-          startDate: new Date(),
+          // For open issues, startDate doubles as the Original Resolution
+          // Date — frozen at creation so later slippage is visible.
+          startDate: new Date(createExpectedDate),
           endDate: new Date(createExpectedDate),
           progress: 0,
           parentId: createLinkId || null,
@@ -104,6 +109,7 @@ export default function OpenIssuesClient({
         title: string;
         status: Status;
         assignee: string | null;
+        startDate: string;
         endDate: string;
         parentId: string | null;
         progress: number;
@@ -115,6 +121,7 @@ export default function OpenIssuesClient({
           title: created.title,
           status: created.status,
           assignee: created.assignee,
+          originalResolutionDate: created.startDate,
           expectedResolutionDate: created.endDate,
           linkedTaskId: created.parentId,
           linkedTaskTitle: created.parentId ? byId.get(created.parentId)?.title ?? null : null,
@@ -139,6 +146,7 @@ export default function OpenIssuesClient({
     patch: Partial<{
       status: Status;
       assignee: string | null;
+      startDate: string;
       endDate: string;
       parentId: string | null;
       progress: number;
@@ -154,6 +162,8 @@ export default function OpenIssuesClient({
               ...r,
               status: patch.status ?? r.status,
               assignee: patch.assignee !== undefined ? patch.assignee : r.assignee,
+              originalResolutionDate:
+                patch.startDate ?? r.originalResolutionDate,
               expectedResolutionDate: patch.endDate ?? r.expectedResolutionDate,
               linkedTaskId: patch.parentId !== undefined ? patch.parentId : r.linkedTaskId,
               linkedTaskTitle:
@@ -176,6 +186,7 @@ export default function OpenIssuesClient({
         body: JSON.stringify({
           status: patch.status,
           assignee: patch.assignee,
+          startDate: patch.startDate ? new Date(patch.startDate) : undefined,
           endDate: patch.endDate ? new Date(patch.endDate) : undefined,
           parentId: patch.parentId,
           progress: patch.progress,
@@ -287,7 +298,9 @@ export default function OpenIssuesClient({
               <Th>Issue</Th>
               <Th>Status</Th>
               <Th>Owner</Th>
-              <Th>Expected Resolution Date</Th>
+              <Th>Original Resolution</Th>
+              <Th>New Resolution</Th>
+              <Th>Slip</Th>
               <Th>Linked Task/Subtask</Th>
               <Th>Urgency</Th>
               <Th>Progress</Th>
@@ -338,12 +351,41 @@ export default function OpenIssuesClient({
                   <input
                     type="date"
                     className="rounded border border-border bg-background px-2 py-1 text-xs"
+                    value={r.originalResolutionDate.slice(0, 10)}
+                    onChange={(e) => {
+                      const nextOriginal = new Date(e.target.value);
+                      const currentNew = new Date(r.expectedResolutionDate);
+                      // Server enforces start<=end; if the user pulls the
+                      // original past the current new date, bump the new
+                      // date too so the PATCH doesn't 400.
+                      const patch: Parameters<typeof patchIssue>[1] = {
+                        startDate: nextOriginal.toISOString(),
+                      };
+                      if (nextOriginal > currentNew) {
+                        patch.endDate = nextOriginal.toISOString();
+                      }
+                      patchIssue(r.id, patch);
+                    }}
+                    title="First-committed target date. Edit only to correct the original estimate."
+                  />
+                </Td>
+                <Td>
+                  <input
+                    type="date"
+                    className="rounded border border-border bg-background px-2 py-1 text-xs"
                     value={r.expectedResolutionDate.slice(0, 10)}
                     onChange={(e) =>
                       patchIssue(r.id, {
                         endDate: new Date(e.target.value).toISOString(),
                       })
                     }
+                    title="Current (updated) target date. Slippage is measured against the original."
+                  />
+                </Td>
+                <Td>
+                  <SlipCell
+                    original={r.originalResolutionDate}
+                    current={r.expectedResolutionDate}
                   />
                 </Td>
                 <Td>
@@ -468,5 +510,41 @@ function urgencyPillClass(urgency: Urgency): string {
   if (urgency === "high") return "bg-red-100 text-red-700";
   if (urgency === "low") return "bg-green-100 text-green-700";
   return "bg-amber-100 text-amber-700";
+}
+
+function SlipCell({ original, current }: { original: string; current: string }) {
+  const msPerDay = 86_400_000;
+  const o = new Date(original);
+  const c = new Date(current);
+  const delta = Math.round((c.getTime() - o.getTime()) / msPerDay);
+  if (delta === 0) {
+    return (
+      <span className="rounded bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+        On track
+      </span>
+    );
+  }
+  if (delta > 0) {
+    return (
+      <span
+        className={`rounded px-2 py-0.5 text-[11px] font-medium ${
+          delta > 7
+            ? "bg-red-100 text-red-700"
+            : "bg-amber-100 text-amber-700"
+        }`}
+        title={`Slipped ${delta} day${delta === 1 ? "" : "s"} from original target.`}
+      >
+        +{delta}d
+      </span>
+    );
+  }
+  return (
+    <span
+      className="rounded bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-700"
+      title={`Pulled in ${Math.abs(delta)} day${delta === -1 ? "" : "s"}.`}
+    >
+      {delta}d
+    </span>
+  );
 }
 

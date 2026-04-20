@@ -5,6 +5,82 @@
   min-width: 0;
 }
 
+/* Inline single-click cell editors used by Start/End/% Complete/Hours
+   and the task name. Display mode looks like plain text; click swaps it
+   for an input without losing layout stability. */
+.inline-edit-display {
+  display: inline-flex;
+  align-items: center;
+  justify-content: inherit;
+  min-height: 22px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: 4px;
+  cursor: text;
+  transition: background-color 0.1s ease, box-shadow 0.1s ease;
+}
+
+.inline-edit-display:hover {
+  background-color: rgba(79, 70, 229, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(79, 70, 229, 0.15);
+}
+
+.inline-edit-display:focus {
+  outline: none;
+  background-color: rgba(79, 70, 229, 0.08);
+  box-shadow: inset 0 0 0 1.5px rgba(79, 70, 229, 0.4);
+}
+
+.inline-edit-display--readonly {
+  cursor: not-allowed;
+}
+
+.inline-edit-display--readonly:hover {
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.inline-edit-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 26px;
+  padding: 2px 6px;
+  margin: 0;
+  font: inherit;
+  font-size: 12px;
+  color: rgb(var(--foreground));
+  background: #ffffff;
+  border: 1.5px solid rgba(79, 70, 229, 0.55);
+  border-radius: 4px;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+  outline: none;
+}
+
+.inline-edit-input:focus {
+  border-color: rgba(79, 70, 229, 0.85);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
+}
+
+.task-cell-text-input {
+  box-sizing: border-box;
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  font-weight: inherit;
+  color: rgb(var(--foreground));
+  background: #ffffff;
+  border: 1.5px solid rgba(79, 70, 229, 0.55);
+  border-radius: 4px;
+  padding: 2px 6px;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+  outline: none;
+}
+
+.task-cell-text-input:focus {
+  border-color: rgba(79, 70, 229, 0.85);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
+}
+
 /* Single unified surface: controls sit on top of the frame with no gap */
 .gantt-controls {
   display: flex;

@@ -169,6 +169,14 @@ export default function GanttClient({
     setLastSavedAt(Date.now());
   }
 
+  // Shared commit path for the inline single-click cell editors. Cells are
+  // intentionally referentially stable (see TaskNameCell notes) so they
+  // call through this ref instead of closing over the latest handler.
+  // Wiring is populated below once patchTask / applyAffected are defined.
+  const commitInlineEditRef = useRef<
+    (id: string, payload: Record<string, unknown>) => Promise<void>
+  >(async () => {});
+
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     setDark(mq.matches);
@@ -375,6 +383,145 @@ export default function GanttClient({
     );
   };
 
+  // Generic click-to-edit inline input for single-click grid edits.
+  // Renders as a display span until it's clicked; click swaps it to a
+  // native input that commits on Enter or blur and cancels on Escape.
+  // Intentionally defined at component scope (not inside a useMemo) so it
+  // can be a real React component with its own hooks.
+  const InlineEditable = useMemo(() => {
+    type Props = {
+      rowId: string;
+      field: string;
+      rawValue: string;
+      inputType: "text" | "number" | "date";
+      toPayload: (raw: string) => Record<string, unknown> | null;
+      display: React.ReactNode;
+      className?: string;
+      inputClassName?: string;
+      readOnly?: boolean;
+      readOnlyReason?: string;
+      placeholder?: string;
+      min?: number;
+      max?: number;
+      step?: number | string;
+      align?: "left" | "center" | "right";
+    };
+    function Inline(props: Props) {
+      const {
+        rowId,
+        rawValue,
+        inputType,
+        toPayload,
+        display,
+        className,
+        inputClassName,
+        readOnly,
+        readOnlyReason,
+        placeholder,
+        min,
+        max,
+        step,
+        align = "left",
+      } = props;
+      const [editing, setEditing] = useState(false);
+      const [draft, setDraft] = useState(rawValue);
+      const inputRef = useRef<HTMLInputElement | null>(null);
+
+      useEffect(() => {
+        if (!editing) setDraft(rawValue);
+      }, [rawValue, editing]);
+
+      useEffect(() => {
+        if (editing && inputRef.current) {
+          inputRef.current.focus();
+          if (inputType === "text") {
+            try {
+              inputRef.current.select();
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      }, [editing, inputType]);
+
+      const commit = () => {
+        setEditing(false);
+        if (draft === rawValue) return;
+        const payload = toPayload(draft);
+        if (!payload) {
+          setDraft(rawValue);
+          return;
+        }
+        void commitInlineEditRef.current(rowId, payload);
+      };
+
+      const cancel = () => {
+        setDraft(rawValue);
+        setEditing(false);
+      };
+
+      if (!editing) {
+        return (
+          <span
+            className={
+              (className ?? "grid-cell-meta") +
+              " inline-edit-display" +
+              (readOnly ? " inline-edit-display--readonly" : "")
+            }
+            role={readOnly ? undefined : "button"}
+            tabIndex={readOnly ? -1 : 0}
+            title={readOnly ? readOnlyReason : "Click to edit"}
+            onClick={(e) => {
+              if (readOnly) return;
+              e.stopPropagation();
+              setEditing(true);
+            }}
+            onKeyDown={(e) => {
+              if (readOnly) return;
+              if (e.key === "Enter" || e.key === " " || e.key === "F2") {
+                e.preventDefault();
+                e.stopPropagation();
+                setEditing(true);
+              }
+            }}
+          >
+            {display}
+          </span>
+        );
+      }
+
+      return (
+        <input
+          ref={inputRef}
+          type={inputType}
+          className={inputClassName ?? "inline-edit-input"}
+          style={{ textAlign: align }}
+          value={draft}
+          min={min}
+          max={max}
+          step={step}
+          placeholder={placeholder}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              cancel();
+            }
+            e.stopPropagation();
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+        />
+      );
+    }
+    Inline.displayName = "InlineEditable";
+    return Inline;
+  }, []);
+
   const DepsLabelCell = useMemo(() => {
     function Cell({ row }: { row: Record<string, unknown> }) {
       const id = String(row?.id ?? "");
@@ -431,43 +578,101 @@ export default function GanttClient({
 
   const StartDateCell = useMemo(() => {
     function Cell({ row }: { row: Record<string, unknown> }) {
+      const id = String(row?.id ?? "");
       const raw = row?.start;
-      if (!raw) return <span className="grid-cell-meta grid-cell-meta--empty">—</span>;
-      return <span className="grid-cell-meta">{shortDate(new Date(String(raw)))}</span>;
+      const dateVal = raw ? new Date(String(raw)) : null;
+      const iso = dateVal ? shortDate(dateVal) : "";
+      return (
+        <InlineEditable
+          rowId={id}
+          field="start"
+          rawValue={iso}
+          inputType="date"
+          align="center"
+          toPayload={(s) => {
+            if (!s) return null;
+            const d = new Date(s);
+            if (Number.isNaN(d.getTime())) return null;
+            return { startDate: d.toISOString() };
+          }}
+          display={
+            dateVal ? (
+              shortDate(dateVal)
+            ) : (
+              <span className="grid-cell-meta--empty">—</span>
+            )
+          }
+        />
+      );
     }
     Cell.displayName = "StartDateCell";
     return Cell;
-  }, []);
+  }, [InlineEditable]);
 
   const EndDateCell = useMemo(() => {
     function Cell({ row }: { row: Record<string, unknown> }) {
+      const id = String(row?.id ?? "");
       const raw = row?.end;
-      if (!raw) return <span className="grid-cell-meta grid-cell-meta--empty">—</span>;
-      const end = new Date(String(raw));
+      const dateVal = raw ? new Date(String(raw)) : null;
+      const iso = dateVal ? shortDate(dateVal) : "";
       const progress = Number(row?.progress ?? 0);
-      const overdue = isOverdue(end, progress);
+      const overdue = dateVal ? isOverdue(dateVal, progress) : false;
       return (
-        <span
+        <InlineEditable
+          rowId={id}
+          field="end"
+          rawValue={iso}
+          inputType="date"
+          align="center"
           className={
             "grid-cell-meta" + (overdue ? " grid-cell-meta--overdue" : "")
           }
-        >
-          {shortDate(end)}
-        </span>
+          toPayload={(s) => {
+            if (!s) return null;
+            const d = new Date(s);
+            if (Number.isNaN(d.getTime())) return null;
+            return { endDate: d.toISOString() };
+          }}
+          display={
+            dateVal ? (
+              shortDate(dateVal)
+            ) : (
+              <span className="grid-cell-meta--empty">—</span>
+            )
+          }
+        />
       );
     }
     Cell.displayName = "EndDateCell";
     return Cell;
-  }, []);
+  }, [InlineEditable]);
 
   const ProgressCell = useMemo(() => {
     function Cell({ row }: { row: Record<string, unknown> }) {
+      const id = String(row?.id ?? "");
       const pct = Math.max(0, Math.min(100, Math.round(Number(row?.progress ?? 0))));
-      return <span className="grid-cell-meta">{pct}%</span>;
+      return (
+        <InlineEditable
+          rowId={id}
+          field="progress"
+          rawValue={String(pct)}
+          inputType="number"
+          align="center"
+          min={0}
+          max={100}
+          step={5}
+          toPayload={(s) => {
+            const n = Number(s);
+            if (!Number.isFinite(n)) return null;
+            return { progress: Math.max(0, Math.min(100, Math.round(n))) };
+          }}
+          display={`${pct}%`}
+        />
+      );
     }
     Cell.displayName = "ProgressCell";
     return Cell;
-  }, []);
+  }, [InlineEditable]);
 
   const EffortCell = useMemo(() => {
     function Cell({ row }: { row: Record<string, unknown> }) {
@@ -475,43 +680,51 @@ export default function GanttClient({
       const kids = childCountByIdRef.current.get(rowId) ?? 0;
       const isParent = kids > 0;
       const raw = row?.effortHours;
-      if (raw == null || raw === "") {
-        return (
-          <span
-            className={
-              "grid-cell-meta grid-cell-meta--empty" +
-              (isParent ? " grid-cell-meta--rollup" : "")
-            }
-            title={
-              isParent
-                ? `Auto-summed from ${kids} child ${kids === 1 ? "task" : "tasks"} — add effort on children to populate.`
-                : "No estimate yet"
-            }
-          >
-            —
-          </span>
-        );
-      }
-      const hrs = Math.max(0, Math.round(Number(raw)));
+      const hasValue = raw != null && raw !== "";
+      const hrs = hasValue ? Math.max(0, Math.round(Number(raw))) : 0;
       const progress = Math.max(0, Math.min(100, Number(row?.progress ?? 0)));
-      const remaining = Math.round(hrs * ((100 - progress) / 100));
-      const title = isParent
-        ? `Rolled up from ${kids} child ${kids === 1 ? "task" : "tasks"}: ${hrs}h total, ${remaining}h remaining at ${progress}% complete.`
-        : `${hrs}h total, ${remaining}h remaining at ${progress}% complete`;
+      const remaining = hasValue ? Math.round(hrs * ((100 - progress) / 100)) : 0;
+      const readOnlyReason = isParent
+        ? `Rolls up from ${kids} child ${kids === 1 ? "task" : "tasks"} — edit children instead.`
+        : undefined;
+      const baseCls = "grid-cell-meta" + (isParent ? " grid-cell-meta--rollup" : "");
+      const display = hasValue ? (
+        <>
+          {remaining}h
+          {isParent ? <span className="grid-cell-rollup">Σ</span> : null}
+        </>
+      ) : (
+        <>
+          <span className="grid-cell-meta--empty">—</span>
+          {isParent ? <span className="grid-cell-rollup">Σ</span> : null}
+        </>
+      );
       return (
-        <span
-          className={
-            "grid-cell-meta" + (isParent ? " grid-cell-meta--rollup" : "")
-          }
-          title={title}
-        >
-          {remaining}h{isParent ? <span className="grid-cell-rollup">Σ</span> : null}
-        </span>
+        <InlineEditable
+          rowId={rowId}
+          field="effortHours"
+          rawValue={hasValue ? String(hrs) : ""}
+          inputType="number"
+          align="center"
+          min={0}
+          step={1}
+          className={baseCls}
+          readOnly={isParent}
+          readOnlyReason={readOnlyReason}
+          placeholder="0"
+          toPayload={(s) => {
+            if (s === "") return { effortHours: null };
+            const n = Number(s);
+            if (!Number.isFinite(n) || n < 0) return null;
+            return { effortHours: Math.round(n) };
+          }}
+          display={display}
+        />
       );
     }
     Cell.displayName = "EffortCell";
     return Cell;
-  }, []);
+  }, [InlineEditable]);
 
   const ResourcesCell = useMemo(() => {
     function Cell({ row }: { row: Record<string, unknown> }) {
@@ -632,7 +845,21 @@ export default function GanttClient({
                 {level.label}
               </span>
             )}
-            <span className="task-cell-text">{text}</span>
+            <InlineEditable
+              rowId={id}
+              field="text"
+              rawValue={text}
+              inputType="text"
+              className="task-cell-text"
+              inputClassName="task-cell-text-input"
+              align="left"
+              toPayload={(s) => {
+                const trimmed = s.trim();
+                if (!trimmed) return null;
+                return { title: trimmed };
+              }}
+              display={text || "Untitled"}
+            />
             {childCount > 0 && rowType !== "ISSUE" && (
               <span className="task-row-badge" title="Child count">
                 {childCount}
@@ -833,6 +1060,84 @@ export default function GanttClient({
       setTimeout(() => suppressUpdateIds.current.delete(a.id), 1500);
     }
   }
+
+  // Keep the inline-edit commit handler fresh. This is the single-click
+  // save path for the grid cells (task name, start, end, hours, % complete).
+  commitInlineEditRef.current = async (id, payload) => {
+    if (Object.keys(payload).length === 0) return;
+
+    // Parents derive effortHours from children — reject direct edits here
+    // the same way the SVAR update-task path does, so the two entry points
+    // stay consistent.
+    if ("effortHours" in payload) {
+      const kidCount = childCountByIdRef.current.get(id) ?? 0;
+      if (kidCount > 0) {
+        setStatus(
+          `Estimated hours rolls up from ${kidCount} child ${kidCount === 1 ? "task" : "tasks"} — edit children instead.`,
+        );
+        setTimeout(() => setStatus(""), 2400);
+        return;
+      }
+    }
+
+    setStatus("Saving…");
+    inFlightIds.current.add(id);
+    try {
+      const { affected, task } = await patchTask(id, payload);
+      const t = task as unknown as {
+        id: string;
+        title?: string;
+        progress?: number;
+        startDate?: string | Date;
+        endDate?: string | Date;
+        effortHours?: number | null;
+      };
+      const prevState = knownTaskState.current.get(id);
+      const startMs = t.startDate ? new Date(t.startDate).getTime() : prevState?.startMs ?? 0;
+      const endMs = t.endDate ? new Date(t.endDate).getTime() : prevState?.endMs ?? 0;
+      knownTaskState.current.set(id, {
+        text: t.title ?? prevState?.text ?? "",
+        progress: Number(t.progress ?? prevState?.progress ?? 0),
+        startMs,
+        endMs,
+        effortHours:
+          t.effortHours === undefined
+            ? prevState?.effortHours ?? null
+            : t.effortHours,
+      });
+
+      // Nudge SVAR with the authoritative server values so the grid row
+      // reflects the commit immediately (title, progress, effort don't
+      // come back through applyAffected since they don't necessarily
+      // reschedule anything).
+      if (apiRef.current) {
+        suppressUpdateIds.current.add(id);
+        apiRef.current.exec("update-task", {
+          id,
+          task: {
+            text: t.title ?? prevState?.text ?? "",
+            progress: Number(t.progress ?? prevState?.progress ?? 0),
+            start: new Date(startMs),
+            end: new Date(endMs),
+            effortHours:
+              t.effortHours === undefined ? prevState?.effortHours ?? null : t.effortHours,
+          },
+          eventSource: "server-reschedule",
+        });
+        setTimeout(() => suppressUpdateIds.current.delete(id), 800);
+      }
+
+      applyAffected(affected);
+      markSaved();
+      setStatus("");
+    } catch (err) {
+      console.error(err);
+      setStatus("Save failed");
+      setTimeout(() => setStatus(""), 2000);
+    } finally {
+      inFlightIds.current.delete(id);
+    }
+  };
 
   function init(api: {
     exec: (action: string, payload: unknown) => void;

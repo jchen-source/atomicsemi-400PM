@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && prisma db push && next build",
+    "build": "node scripts/prepare-postgres-schema.mjs && prisma generate && prisma db push && next build",
     "start": "next start",
     "lint": "next lint",
     "db:up": "docker compose up -d",

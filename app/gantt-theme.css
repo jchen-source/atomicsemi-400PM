@@ -566,6 +566,110 @@
   height: 100%;
 }
 
+/* Clickable indicator dot in the top-right of every bar that has
+   linked open issues. Lives outside .task-pill (which is
+   pointer-events:none) so the click still reaches the anchor. */
+/* Inline "N open issues" badge inside the bar. Visible on every bar
+   whose open-issue rollup > 0. Keeps the color story consistent with
+   the Open Issues page (amber = active, red pulsing when linked task
+   is slipping). Clickable — deep-links into Open Issues filtered to
+   just this task's subtree. */
+.task-pill__open-issues {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 0 6px;
+  height: 16px;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+.task-pill__open-issues:hover {
+  background: rgba(245, 158, 11, 0.24);
+  color: #92400e;
+}
+.task-pill__open-issues-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #f59e0b;
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.9);
+}
+/* When the bar or any of its linked issues are slipping, tint the
+   badge red to match the pulsing dot. */
+.task-pill-wrap:has(.task-issue-indicator--slipping) .task-pill__open-issues,
+.task-pill--overdue .task-pill__open-issues {
+  background: rgba(239, 68, 68, 0.16);
+  color: #b91c1c;
+}
+.task-pill-wrap:has(.task-issue-indicator--slipping) .task-pill__open-issues-dot,
+.task-pill--overdue .task-pill__open-issues-dot {
+  background: #ef4444;
+}
+
+.task-issue-indicator {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.35);
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 3;
+  transition: transform 120ms ease;
+}
+.task-issue-indicator:hover {
+  transform: scale(1.25);
+}
+.task-issue-indicator--active {
+  background: #f59e0b;
+}
+.task-issue-indicator--slipping {
+  background: #ef4444;
+  animation: task-issue-pulse 1.6s ease-out infinite;
+}
+.task-issue-indicator--resolved {
+  background: #10b981;
+  opacity: 0.9;
+  animation: task-issue-fade 12s ease-out 1 forwards;
+}
+@keyframes task-issue-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.65),
+      0 1px 3px rgba(15, 23, 42, 0.35);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(239, 68, 68, 0),
+      0 1px 3px rgba(15, 23, 42, 0.35);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0),
+      0 1px 3px rgba(15, 23, 42, 0.35);
+  }
+}
+@keyframes task-issue-fade {
+  0%,
+  40% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0.35;
+  }
+}
+
 /* SVAR wraps taskTemplate in `.wx-bar .wx-content` with overflow:hidden,
    white-space:nowrap, and text-overflow:ellipsis. Relax those so our
    single-line pill + % chip render together cleanly inside the bar

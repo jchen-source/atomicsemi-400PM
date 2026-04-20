@@ -210,11 +210,28 @@ export default function GanttClient({
   links,
   milestones = [],
   emptyState,
+  issueIndicatorByTaskId = {},
+  openIssueCountByTaskId = {},
 }: {
   tasks: GanttTaskInput[];
   links: GanttLinkInput[];
   milestones?: AttachedMilestone[];
   emptyState?: React.ReactNode;
+  /**
+   * Per-task indicator state, computed server-side from linked open
+   * issues. "active" = has active issues but none confirmed to slip,
+   * "slipping" = at least one issue reports Task/Milestone slip,
+   * "resolved" = all linked issues were recently resolved (we fade
+   * this out on the client after a short period).
+   */
+  issueIndicatorByTaskId?: Record<string, "active" | "slipping" | "resolved">;
+  /**
+   * Per-task rollup of open issues. `direct` is the number of active
+   * issues linked directly to this task; `rollup` is self + every
+   * descendant (so a workstream shows the total nested beneath it).
+   * Rendered as a visible "N open" badge on the bar.
+   */
+  openIssueCountByTaskId?: Record<string, { direct: number; rollup: number }>;
 }) {
   const router = useRouter();
   const apiRef = useRef<{
@@ -685,6 +702,29 @@ export default function GanttClient({
     depthByIdRef.current = depthById;
   }, [depthById]);
 
+  // Per-task open-issue indicator state. Held in a ref so TaskTemplate
+  // can read without re-memoizing on every prop change.
+  const issueIndicatorByIdRef = useRef<
+    Map<string, "active" | "slipping" | "resolved">
+  >(new Map());
+  useEffect(() => {
+    issueIndicatorByIdRef.current = new Map(
+      Object.entries(issueIndicatorByTaskId ?? {}),
+    );
+  }, [issueIndicatorByTaskId]);
+
+  // Open-issue rollup counts (self + descendants). Held in a ref so
+  // the memoized TaskTemplate doesn't need to be rebuilt when counts
+  // change — we just repaint.
+  const issueCountByIdRef = useRef<
+    Map<string, { direct: number; rollup: number }>
+  >(new Map());
+  useEffect(() => {
+    issueCountByIdRef.current = new Map(
+      Object.entries(openIssueCountByTaskId ?? {}),
+    );
+  }, [openIssueCountByTaskId]);
+
 
   const TaskTemplate = ({
     data,
@@ -868,9 +908,61 @@ export default function GanttClient({
             {visibleLabel ? (
               <span className="task-pill__name">{visibleLabel}</span>
             ) : null}
+            {(() => {
+              const counts = issueCountByIdRef.current.get(id);
+              if (!counts || counts.rollup <= 0) return null;
+              // On leaf tasks with only their own issues, the dot
+              // indicator already communicates presence — the badge
+              // duplicates it. Still show it for leaves because the
+              // number is more informative than a dot.
+              const label =
+                counts.rollup === 1 ? "1 open issue" : `${counts.rollup} open issues`;
+              const title =
+                counts.direct === counts.rollup
+                  ? `${label} linked to this task`
+                  : `${counts.rollup} open issues nested here (${counts.direct} direct)`;
+              const href =
+                counts.rollup === counts.direct
+                  ? `/open-issues?taskId=${encodeURIComponent(id)}`
+                  : `/open-issues?workstreamId=${encodeURIComponent(id)}`;
+              return (
+                <a
+                  href={href}
+                  className="task-pill__open-issues"
+                  title={title}
+                  aria-label={title}
+                  style={{ pointerEvents: "auto" }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <span aria-hidden="true" className="task-pill__open-issues-dot" />
+                  {label}
+                </a>
+              );
+            })()}
             <span className="task-pill__pct">{pct}%</span>
           </div>
         </div>
+        {(() => {
+          const state = issueIndicatorByIdRef.current.get(id);
+          if (!state) return null;
+          const title =
+            state === "slipping"
+              ? "Issue is slipping the schedule — click to review"
+              : state === "active"
+                ? "Active issue linked to this task — click to review"
+                : "Recently resolved issue";
+          return (
+            <a
+              href={`/open-issues?taskId=${encodeURIComponent(id)}`}
+              className={`task-issue-indicator task-issue-indicator--${state}`}
+              title={title}
+              aria-label={title}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+            />
+          );
+        })()}
         {tipPos && typeof document !== "undefined"
           ? createPortal(
               <div
@@ -901,6 +993,21 @@ export default function GanttClient({
                       <dd>{owner}</dd>
                     </div>
                   )}
+                  {(() => {
+                    const c = issueCountByIdRef.current.get(id);
+                    if (!c || c.rollup <= 0) return null;
+                    return (
+                      <div>
+                        <dt>Open issues</dt>
+                        <dd>
+                          {c.rollup}
+                          {c.direct !== c.rollup
+                            ? ` (${c.direct} direct)`
+                            : ""}
+                        </dd>
+                      </div>
+                    );
+                  })()}
                 </dl>
               </div>,
               document.body,
@@ -3907,6 +4014,38 @@ export default function GanttClient({
                 </svg>
               </span>
               Add child task
+            </button>
+          )}
+          {contextMenu.scope.length === 1 && (
+            <button
+              type="button"
+              className="task-context-item"
+              onClick={() => {
+                const id = contextMenu.taskId;
+                setContextMenu(null);
+                // Deep-link to Open Issues with this task prefilled as
+                // the linked task in the create form.
+                if (typeof window !== "undefined") {
+                  window.location.href = `/open-issues?taskId=${encodeURIComponent(id)}&focus=all`;
+                }
+              }}
+            >
+              <span className="task-context-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  width="14"
+                  height="14"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M12 8v4M12 16h.01" />
+                </svg>
+              </span>
+              Create Issue from Task
             </button>
           )}
           {contextMenu.scope.length === 1 &&

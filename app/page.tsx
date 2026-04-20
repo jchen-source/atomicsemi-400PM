@@ -54,11 +54,100 @@ export default async function GanttPage() {
     incomingDepsByTask.set(d.dependentId, arr);
   }
   const linkedOpenIssuesByTask = new Map<string, string[]>();
+  // Tri-state per-task indicator derived from linked issues:
+  //   - "slipping"  = at least one active issue has scheduleImpact flagged as
+  //     Task Slip or Milestone Slip (stored as `impact:...` in tags)
+  //   - "active"    = has active issues but none flagged as slipping
+  //   - "resolved"  = no active issues but at least one was resolved in the
+  //     last 3 days; fades out client-side via CSS
+  const issueIndicatorByTaskId: Record<
+    string,
+    "active" | "slipping" | "resolved"
+  > = {};
+  const issuesByTask = new Map<string, typeof tasks>();
   for (const t of tasks) {
     if (t.type !== "ISSUE" || !t.parentId) continue;
-    const arr = linkedOpenIssuesByTask.get(t.parentId) ?? [];
-    arr.push(t.title);
-    linkedOpenIssuesByTask.set(t.parentId, arr);
+    const arr = issuesByTask.get(t.parentId) ?? [];
+    arr.push(t);
+    issuesByTask.set(t.parentId, arr);
+    if (t.status !== "DONE") {
+      const titles = linkedOpenIssuesByTask.get(t.parentId) ?? [];
+      titles.push(t.title);
+      linkedOpenIssuesByTask.set(t.parentId, titles);
+    }
+  }
+  const RECENT_RESOLVE_MS = 72 * 3600 * 1000;
+  const now = Date.now();
+  for (const [taskId, its] of issuesByTask) {
+    const active = its.filter((i) => i.status !== "DONE");
+    if (active.length > 0) {
+      const slipping = active.some((i) => {
+        const tags = parseTags(i.tags);
+        return tags.some((tag) => {
+          const low = tag.toLowerCase();
+          return (
+            low === "impact:task slip" ||
+            low === "impact:milestone slip" ||
+            low.replace(/\s+/g, "") === "impact:taskslip" ||
+            low.replace(/\s+/g, "") === "impact:milestoneslip"
+          );
+        });
+      });
+      issueIndicatorByTaskId[taskId] = slipping ? "slipping" : "active";
+    } else {
+      const recent = its.some(
+        (i) => now - new Date(i.updatedAt).getTime() <= RECENT_RESOLVE_MS,
+      );
+      if (recent) issueIndicatorByTaskId[taskId] = "resolved";
+    }
+  }
+
+  // Rollup open-issue counts so every ancestor (task, workstream,
+  // program) shows the total number of active issues nested beneath
+  // it. "Direct" counts the issues linked to a task itself; "rollup"
+  // is self + all descendants, recomputed with memoized DFS so we
+  // only visit each node once.
+  const childrenByParent = new Map<string | null, string[]>();
+  for (const t of tasks) {
+    if (t.type === "ISSUE") continue;
+    if (t.type === "MILESTONE" && t.parentId) continue;
+    const arr = childrenByParent.get(t.parentId) ?? [];
+    arr.push(t.id);
+    childrenByParent.set(t.parentId, arr);
+  }
+  const directActiveByTask = new Map<string, number>();
+  for (const t of tasks) {
+    if (t.type !== "ISSUE" || !t.parentId) continue;
+    if (t.status === "DONE") continue;
+    directActiveByTask.set(
+      t.parentId,
+      (directActiveByTask.get(t.parentId) ?? 0) + 1,
+    );
+  }
+  const rollupByTask = new Map<string, number>();
+  const computeRollup = (id: string): number => {
+    const cached = rollupByTask.get(id);
+    if (cached !== undefined) return cached;
+    let sum = directActiveByTask.get(id) ?? 0;
+    for (const child of childrenByParent.get(id) ?? []) {
+      sum += computeRollup(child);
+    }
+    rollupByTask.set(id, sum);
+    return sum;
+  };
+  for (const t of tasks) {
+    if (t.type === "ISSUE") continue;
+    computeRollup(t.id);
+  }
+  const openIssueCountByTaskId: Record<
+    string,
+    { direct: number; rollup: number }
+  > = {};
+  for (const t of tasks) {
+    if (t.type === "ISSUE") continue;
+    const direct = directActiveByTask.get(t.id) ?? 0;
+    const rollup = rollupByTask.get(t.id) ?? 0;
+    if (rollup > 0) openIssueCountByTaskId[t.id] = { direct, rollup };
   }
 
   return (
@@ -142,9 +231,7 @@ export default async function GanttPage() {
           .filter((t) => !(t.type === "MILESTONE" && t.parentId))
           .map((t) => ({
             id: t.id,
-            text: linkedOpenIssuesByTask.get(t.id)?.length
-              ? `${t.title} [${linkedOpenIssuesByTask.get(t.id)!.length} open]`
-              : t.title,
+            text: t.title,
             start: t.startDate.toISOString(),
             end: t.endDate.toISOString(),
             depsLabel: linkedOpenIssuesByTask.get(t.id)?.length
@@ -189,6 +276,8 @@ export default async function GanttPage() {
             target: d.dependentId,
             type: depTypeToLinkType(d.type),
           }))}
+        issueIndicatorByTaskId={issueIndicatorByTaskId}
+        openIssueCountByTaskId={openIssueCountByTaskId}
         emptyState={
           tasks.length === 0 ? (
             <div className="roadmap-empty">

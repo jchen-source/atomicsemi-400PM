@@ -416,6 +416,73 @@
   color: #ffffff;
 }
 
+/* Prominent Undo button placed right after the zoom cluster. A
+   global-level action that pairs with the ⌘Z shortcut, so it gets
+   its own treatment (icon + label + kbd hint) rather than hiding
+   among the other `gantt-linkmode-btn`s further down the toolbar. */
+.gantt-undo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px 0 10px;
+  border-radius: 8px;
+  border: 1px solid rgb(var(--border));
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease,
+    border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.gantt-undo-btn:hover:not(:disabled) {
+  background: #eef2ff;
+  color: #3730a3;
+  border-color: #c7d2fe;
+  box-shadow: 0 1px 2px rgba(67, 56, 202, 0.1);
+}
+.gantt-undo-btn:active:not(:disabled) {
+  background: #e0e7ff;
+  transform: translateY(0.5px);
+}
+.gantt-undo-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  color: #94a3b8;
+}
+.gantt-undo-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  padding: 0 5px;
+  margin-left: 2px;
+  border: 1px solid rgb(var(--border));
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #64748b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.gantt-undo-btn:hover:not(:disabled) .gantt-undo-kbd {
+  background: #ffffff;
+  color: #3730a3;
+  border-color: #c7d2fe;
+}
+.gantt-undo-btn:disabled .gantt-undo-kbd {
+  opacity: 0.7;
+}
+/* Hide the shortcut hint on narrow viewports to keep the toolbar tidy. */
+@media (max-width: 900px) {
+  .gantt-undo-kbd {
+    display: none;
+  }
+}
+
 /* Inline task search in the toolbar. Collapses to a simple "Search"
    button until opened, then expands into an input + match count + close. */
 .gantt-search {

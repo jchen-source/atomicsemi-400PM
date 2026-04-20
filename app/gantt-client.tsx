@@ -4165,6 +4165,37 @@ export default function GanttClient({
           </button>
         </div>
         <div className="gantt-controls-divider" aria-hidden />
+        <button
+          type="button"
+          onClick={() => void undoLastRef.current()}
+          className="gantt-undo-btn"
+          disabled={undoStackRef.current.length === 0}
+          title={
+            undoStackRef.current.length === 0
+              ? "Nothing to undo"
+              : `Undo ${undoStackRef.current[undoStackRef.current.length - 1]?.label ?? "last change"} (⌘Z)`
+          }
+          data-undo-tick={undoTick}
+          aria-label="Undo last change"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="14"
+            height="14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M3 7v6h6" />
+            <path d="M21 17a9 9 0 0 0-15-6.7L3 13" />
+          </svg>
+          <span>Undo</span>
+          <kbd className="gantt-undo-kbd" aria-hidden="true">⌘Z</kbd>
+        </button>
+        <div className="gantt-controls-divider" aria-hidden />
         <div className="gantt-search" role="search">
           {searchOpen ? (
             <>
@@ -4357,20 +4388,6 @@ export default function GanttClient({
           title="Create sequential dependencies with one click"
         >
           Auto-link
-        </button>
-        <button
-          type="button"
-          onClick={() => void undoLastRef.current()}
-          className="gantt-linkmode-btn"
-          disabled={undoStackRef.current.length === 0}
-          title={
-            undoStackRef.current.length === 0
-              ? "Nothing to undo"
-              : `Undo ${undoStackRef.current[undoStackRef.current.length - 1]?.label ?? "last change"} (⌘Z)`
-          }
-          data-undo-tick={undoTick}
-        >
-          ↶ Undo
         </button>
         {criticalPathTargetId ? (
           <button

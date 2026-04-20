@@ -29,7 +29,7 @@ import {
 type LinkTarget = {
   id: string;
   title: string;
-  type: "EPIC" | "TASK" | "MILESTONE";
+  type: "EPIC" | "TASK";
   parentId: string | null;
   parentTitle: string | null;
 };
@@ -1680,7 +1680,7 @@ function ImpactSelect({
     None: "bg-slate-50 text-slate-600 border-slate-200",
     "At Risk": "bg-amber-50 text-amber-800 border-amber-200",
     "Task Slip": "bg-orange-100 text-orange-800 border-orange-200",
-    "Milestone Slip": "bg-red-100 text-red-800 border-red-200",
+    "Workstream Slip": "bg-red-100 text-red-800 border-red-200",
   };
   return (
     <select
@@ -1844,6 +1844,101 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
 
 // ---------- Reminder panel ----------
 
+/**
+ * Client-side dismissal state for the Standup Reminder panel.
+ *
+ * Persisted to localStorage keyed by task id → the plannedEnd ISO that
+ * was dismissed. Storing the ISO alongside the id lets us silently
+ * re-surface an item when the task is rescheduled — the stored ISO
+ * won't match the new plannedEnd, so the dismissal is treated as
+ * stale and we show the item again. It also auto-expires a dismissal
+ * the moment the task's planned-end falls more than 1 day into the
+ * past, so stale bucket rows don't live forever in localStorage.
+ */
+const DISMISSED_STORAGE_KEY = "pm-standup-dismissed-v1";
+const DISMISS_GRACE_MS = 24 * 60 * 60 * 1000;
+
+function readDismissedMap(): Map<string, string> {
+  if (typeof window === "undefined") return new Map();
+  try {
+    const raw = window.localStorage.getItem(DISMISSED_STORAGE_KEY);
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return new Map(Object.entries(parsed));
+  } catch {
+    return new Map();
+  }
+}
+
+function writeDismissedMap(m: Map<string, string>) {
+  if (typeof window === "undefined") return;
+  try {
+    const obj: Record<string, string> = {};
+    for (const [k, v] of m) obj[k] = v;
+    window.localStorage.setItem(DISMISSED_STORAGE_KEY, JSON.stringify(obj));
+  } catch {
+    /* quota / disabled storage — dismissals become in-memory only */
+  }
+}
+
+function useDismissedReminders() {
+  const [map, setMap] = useState<Map<string, string>>(() =>
+    readDismissedMap(),
+  );
+
+  useEffect(() => {
+    writeDismissedMap(map);
+  }, [map]);
+
+  // Stay in sync across tabs so dismissing on one open-issues tab
+  // mirrors on another.
+  useEffect(() => {
+    const onStorage = (ev: StorageEvent) => {
+      if (ev.key !== DISMISSED_STORAGE_KEY) return;
+      setMap(readDismissedMap());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  const isDismissed = (item: ReminderItem): boolean => {
+    const stored = map.get(item.id);
+    if (!stored) return false;
+    // Rescheduling the task invalidates the old dismissal.
+    if (stored !== item.plannedEnd) return false;
+    // If the task's planned end is more than a grace period in the
+    // past, stop suppressing — the standup should flag it again.
+    const endMs = new Date(item.plannedEnd).getTime();
+    if (Number.isFinite(endMs) && endMs + DISMISS_GRACE_MS < Date.now()) {
+      return false;
+    }
+    return true;
+  };
+
+  const dismiss = (item: ReminderItem) => {
+    setMap((prev) => {
+      const next = new Map(prev);
+      next.set(item.id, item.plannedEnd);
+      return next;
+    });
+  };
+
+  const restore = (id: string) => {
+    setMap((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Map(prev);
+      next.delete(id);
+      return next;
+    });
+  };
+
+  const restoreAll = () => {
+    setMap((prev) => (prev.size === 0 ? prev : new Map()));
+  };
+
+  return { map, isDismissed, dismiss, restore, restoreAll };
+}
+
 function ReminderPanel({
   reminder,
   onOpenCreate,
@@ -1851,30 +1946,88 @@ function ReminderPanel({
   reminder: ReminderBuckets;
   onOpenCreate: (taskId: string) => void;
 }) {
+  const { isDismissed, dismiss, restoreAll, map } = useDismissedReminders();
+
+  const visibleShouldHave = reminder.shouldHaveStarted.filter(
+    (it) => !isDismissed(it),
+  );
+  const visibleComingUp = reminder.comingUp.filter((it) => !isDismissed(it));
+  const hiddenShouldHave =
+    reminder.shouldHaveStarted.length - visibleShouldHave.length;
+  const hiddenComingUp = reminder.comingUp.length - visibleComingUp.length;
+  const totalHidden = hiddenShouldHave + hiddenComingUp;
+
+  // Auto-prune dismissals whose referenced task is no longer in either
+  // bucket (task deleted, rescheduled out of horizon, completed, etc.)
+  // so localStorage never grows unbounded.
+  useEffect(() => {
+    if (map.size === 0) return;
+    const live = new Set<string>();
+    for (const it of reminder.shouldHaveStarted) live.add(it.id);
+    for (const it of reminder.comingUp) live.add(it.id);
+    let dirty = false;
+    const next = new Map(map);
+    for (const id of map.keys()) {
+      if (!live.has(id)) {
+        next.delete(id);
+        dirty = true;
+      }
+    }
+    if (dirty) writeDismissedMap(next);
+    // Intentionally not calling setMap to avoid a re-render loop —
+    // next render will pick up the trimmed storage on its own.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reminder.shouldHaveStarted, reminder.comingUp]);
+
   return (
     <div className="space-y-3 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold text-slate-900">
           Standup Reminder
         </h2>
-        <span className="text-[10px] uppercase tracking-wide text-slate-400">
-          Read-only
-        </span>
+        {totalHidden > 0 ? (
+          <button
+            type="button"
+            onClick={restoreAll}
+            className="text-[10px] font-medium uppercase tracking-wide text-slate-500 underline-offset-2 hover:text-slate-900 hover:underline"
+            title="Un-dismiss every reminder you've hidden"
+          >
+            Show {totalHidden} hidden
+          </button>
+        ) : (
+          <span className="text-[10px] uppercase tracking-wide text-slate-400">
+            Dismiss to silence
+          </span>
+        )}
       </div>
       <ReminderGroup
         label="Should Have Started"
         tone="red"
-        items={reminder.shouldHaveStarted}
+        items={visibleShouldHave}
+        totalCount={reminder.shouldHaveStarted.length}
+        hiddenCount={hiddenShouldHave}
         onOpenCreate={onOpenCreate}
-        emptyText="Every planned task has kicked off."
+        onDismiss={dismiss}
+        emptyText={
+          reminder.shouldHaveStarted.length === 0
+            ? "Every planned task has kicked off."
+            : "All late starts are dismissed for now."
+        }
         hint="Planned to start today or earlier, not yet in progress, and no linked open issue."
       />
       <ReminderGroup
         label="Coming Up · 5 Days"
         tone="blue"
-        items={reminder.comingUp}
+        items={visibleComingUp}
+        totalCount={reminder.comingUp.length}
+        hiddenCount={hiddenComingUp}
         onOpenCreate={onOpenCreate}
-        emptyText="Nothing new kicks off in the next 5 days."
+        onDismiss={dismiss}
+        emptyText={
+          reminder.comingUp.length === 0
+            ? "Nothing new kicks off in the next 5 days."
+            : "All upcoming reminders are dismissed for now."
+        }
         hint="Scheduled to start within the next five days."
       />
     </div>
@@ -1885,14 +2038,20 @@ function ReminderGroup({
   label,
   tone,
   items,
+  totalCount,
+  hiddenCount,
   onOpenCreate,
+  onDismiss,
   emptyText,
   hint,
 }: {
   label: string;
   tone: "amber" | "blue" | "red" | "slate";
   items: ReminderItem[];
+  totalCount: number;
+  hiddenCount: number;
   onOpenCreate: (taskId: string) => void;
+  onDismiss: (item: ReminderItem) => void;
   emptyText: string;
   hint?: string;
 }) {
@@ -1910,7 +2069,13 @@ function ReminderGroup({
         >
           {label}
         </span>
-        <span className="text-[10px] text-slate-400">{items.length}</span>
+        <span className="text-[10px] text-slate-400">
+          {items.length}
+          {hiddenCount > 0 ? ` · ${hiddenCount} hidden` : ""}
+          {totalCount !== items.length + hiddenCount
+            ? ` / ${totalCount}`
+            : ""}
+        </span>
       </div>
       {hint && (
         <p className="mb-1.5 pl-1 text-[10px] text-slate-400">{hint}</p>
@@ -1924,6 +2089,7 @@ function ReminderGroup({
               key={`${label}-${it.id}`}
               item={it}
               onOpenCreate={() => onOpenCreate(it.id)}
+              onDismiss={() => onDismiss(it)}
             />
           ))}
           {items.length > 8 && (
@@ -1940,9 +2106,11 @@ function ReminderGroup({
 function ReminderRow({
   item,
   onOpenCreate,
+  onDismiss,
 }: {
   item: ReminderItem;
   onOpenCreate: () => void;
+  onDismiss: () => void;
 }) {
   return (
     <li className="group rounded border border-slate-100 bg-slate-50/60 px-2 py-1.5 text-[11px] hover:bg-white hover:shadow-sm">
@@ -1988,6 +2156,26 @@ function ReminderRow({
           >
             <PlusIcon className="h-3 w-3" />
           </button>
+          <button
+            type="button"
+            onClick={onDismiss}
+            title="Dismiss this reminder (re-appears if the date changes)"
+            aria-label="Dismiss reminder"
+            className="rounded border border-slate-200 bg-white p-1 text-slate-500 hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              className="h-3 w-3"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
         </div>
       </div>
     </li>
@@ -1997,15 +2185,13 @@ function ReminderRow({
 function KindBadge({
   kind,
 }: {
-  kind: "task" | "workstream" | "milestone";
+  kind: "task" | "workstream";
 }) {
-  const label = kind === "workstream" ? "WS" : kind === "milestone" ? "MS" : "T";
+  const label = kind === "workstream" ? "WS" : "T";
   const tone =
     kind === "workstream"
       ? "bg-indigo-100 text-indigo-700"
-      : kind === "milestone"
-        ? "bg-rose-100 text-rose-700"
-        : "bg-slate-100 text-slate-600";
+      : "bg-slate-100 text-slate-600";
   return (
     <span
       aria-hidden

@@ -49,10 +49,10 @@ export default async function OpenIssuesPage({
       where: { type: "ISSUE" },
       orderBy: { updatedAt: "desc" },
     }),
-    // Anything that can be planned: workstreams, tasks, milestones.
+    // Anything that can be planned: programs / workstreams and tasks.
     // Used both for the linked-task dropdown and for the reminder panel.
     prisma.task.findMany({
-      where: { type: { in: ["EPIC", "TASK", "MILESTONE"] } },
+      where: { type: { in: ["EPIC", "TASK"] } },
       orderBy: [{ type: "asc" }, { title: "asc" }],
     }),
     prisma.person.findMany({
@@ -159,14 +159,14 @@ export default async function OpenIssuesPage({
 
   const summary = summariseIssues(issues);
 
-  // The client treats EPIC/TASK/MILESTONE equivalently for linking,
-  // but we surface the kind so the picker can label them.
+  // The client treats EPIC/TASK equivalently for linking, but we
+  // surface the kind so the picker can label them.
   const linkTargets = planningTasks.map((t) => ({
     id: t.id,
     title: t.title,
-    type: (t.type === "EPIC" || t.type === "TASK" || t.type === "MILESTONE"
-      ? t.type
-      : "TASK") as "EPIC" | "TASK" | "MILESTONE",
+    type: (t.type === "EPIC" || t.type === "TASK" ? t.type : "TASK") as
+      | "EPIC"
+      | "TASK",
     parentId: t.parentId,
     parentTitle: t.parentId
       ? parentTitleById.get(t.parentId) ?? null

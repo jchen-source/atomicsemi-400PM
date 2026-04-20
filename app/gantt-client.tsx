@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
@@ -33,8 +40,8 @@ export type GanttTaskInput = {
   progress: number;
   parent: string | null;
   open?: boolean;
-  type: "summary" | "task" | "milestone";
-  rowType: "EPIC" | "TASK" | "ISSUE" | "MILESTONE";
+  type: "summary" | "task";
+  rowType: "EPIC" | "TASK" | "ISSUE";
   urgency?: "high" | "medium" | "low";
   effortHours?: number | null;
   assignee?: string | null;
@@ -69,6 +76,8 @@ type GanttTaskRuntime = Omit<GanttTaskInput, "start" | "end" | "parent"> & {
   end: Date;
   duration: number;
   parent?: string;
+  /** Seed whether a parent row opens expanded on first render. */
+  open?: boolean;
 };
 
 type ZoomLevel = "day" | "week" | "month" | "quarter";
@@ -168,6 +177,19 @@ function fmtTipDate(raw: unknown): string {
   });
 }
 
+// Given a total span (in days) across all tasks, pick the zoom level
+// that lets the whole project fit on screen without being cramped or
+// empty. Thresholds are tuned so that day-level is used for a sprint,
+// week for a quarter, month for a year, and quarter for multi-year
+// programs. Mirrors the "Fit" button logic below.
+function pickZoomForSpanDays(days: number): ZoomLevel {
+  if (!Number.isFinite(days) || days <= 0) return "week";
+  if (days <= 21) return "day";
+  if (days <= 120) return "week";
+  if (days <= 540) return "month";
+  return "quarter";
+}
+
 const ZOOM_SCALES: Record<
   ZoomLevel,
   Array<{ unit: string; step: number; format: (date: Date) => string }>
@@ -194,33 +216,20 @@ const ZOOM_SCALES: Record<
   ],
 };
 
-export type AttachedMilestone = {
-  id: string;
-  title: string;
-  /** ISO string — usually equals the parent's endDate. */
-  date: string;
-  /** Parent task id this milestone is anchored to. */
-  parentId: string;
-  /** 0-100. When 100 the star renders "done" (green). */
-  progress?: number;
-};
-
 export default function GanttClient({
   tasks,
   links,
-  milestones = [],
   emptyState,
   issueIndicatorByTaskId = {},
   openIssueCountByTaskId = {},
 }: {
   tasks: GanttTaskInput[];
   links: GanttLinkInput[];
-  milestones?: AttachedMilestone[];
   emptyState?: React.ReactNode;
   /**
    * Per-task indicator state, computed server-side from linked open
    * issues. "active" = has active issues but none confirmed to slip,
-   * "slipping" = at least one issue reports Task/Milestone slip,
+   * "slipping" = at least one issue reports a schedule slip,
    * "resolved" = all linked issues were recently resolved (we fade
    * this out on the client after a short period).
    */
@@ -255,7 +264,23 @@ export default function GanttClient({
     >(),
   );
   const [status, setStatus] = useState<string>("");
-  const [zoom, setZoom] = useState<ZoomLevel>("week");
+  // Pick the zoom that fits the entire project into the timeline on
+  // first paint. Without this, new users land on "week" and see the
+  // chart end mid-way, which reads as "dates take forever to populate"
+  // because they have to scroll/zoom to see the rest.
+  const [zoom, setZoom] = useState<ZoomLevel>(() => {
+    if (!tasks.length) return "week";
+    let minMs = Infinity;
+    let maxMs = -Infinity;
+    for (const t of tasks) {
+      const s = new Date(t.start).getTime();
+      const e = new Date(t.end).getTime();
+      if (Number.isFinite(s) && s < minMs) minMs = s;
+      if (Number.isFinite(e) && e > maxMs) maxMs = e;
+    }
+    if (!Number.isFinite(minMs) || !Number.isFinite(maxMs)) return "week";
+    return pickZoomForSpanDays((maxMs - minMs) / 86_400_000);
+  });
   const [dark, setDark] = useState(false);
   const [depEditorTaskId, setDepEditorTaskId] = useState<string | null>(null);
   const [depEditorQuery, setDepEditorQuery] = useState("");
@@ -281,6 +306,26 @@ export default function GanttClient({
     selectedIdsRef.current = selectedIds;
   }, [selectedIds]);
   const selectAnchorIdRef = useRef<string | null>(null);
+
+  // Critical-path focus. When the user clicks a bar (any level), we
+  // compute the chain of predecessors (+ that bar's own ancestors,
+  // so the workstream rolls up with the chain) that most constrains
+  // its start date, and paint them in red. Clicking empty space or
+  // pressing Esc clears the focus.
+  const [criticalPathTargetId, setCriticalPathTargetId] = useState<
+    string | null
+  >(null);
+  const criticalPathTargetIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    criticalPathTargetIdRef.current = criticalPathTargetId;
+  }, [criticalPathTargetId]);
+
+  // Mirror of each parent row's open/closed state. Populated from
+  // SVAR's `open-task` events so the in-bar chevron (rendered by
+  // TaskTemplate) can point the right direction even when another
+  // code path toggled the row (e.g. Expand all, critical-path auto
+  // expand, keyboard shortcut).
+  const openByIdRef = useRef<Map<string, boolean>>(new Map());
 
   // Task IDs that were just created but haven't been placed yet. Their
   // bars render as faded "ghost" pills and clicking anywhere in the
@@ -341,6 +386,39 @@ export default function GanttClient({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Notion-style filter menu on the Gantt toolbar. Lets the user hide
+  // whole programs/workstreams (and their subtrees), and hide tasks by
+  // urgency. Hidden subtrees are fully removed from the Gantt data, so
+  // SVAR doesn't render any orphaned links or dangling children.
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [hiddenSubtreeIds, setHiddenSubtreeIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [hiddenUrgencies, setHiddenUrgencies] = useState<
+    Set<"high" | "medium" | "low">
+  >(() => new Set());
+  const filterMenuRef = useRef<HTMLDivElement | null>(null);
+
+  // Close the filter popover on outside click / Escape.
+  useEffect(() => {
+    if (!filterOpen) return;
+    const onDown = (ev: MouseEvent) => {
+      const el = filterMenuRef.current;
+      if (!el) return;
+      if (el.contains(ev.target as Node)) return;
+      setFilterOpen(false);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setFilterOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [filterOpen]);
 
   // Undo stack. Each entry knows how to reverse a user-visible mutation
   // (patch a task back to prior values, recreate a deleted link, etc.).
@@ -533,21 +611,106 @@ export default function GanttClient({
     return () => mq.removeEventListener("change", listener);
   }, []);
 
-  const initialTasks: GanttTaskRuntime[] = useMemo(
-    () =>
-      tasks.map((t) => {
+  // Expand the "visible filter" state into the actual set of task ids
+  // that should be hidden: uncheck a program → hide its entire subtree;
+  // hide urgency=high → hide every task tagged high (and its subtree,
+  // so no child bars dangle underneath a missing parent).
+  const filterHiddenIds = useMemo(() => {
+    const childrenByParent = new Map<string, string[]>();
+    for (const t of tasks) {
+      if (!t.parent) continue;
+      const arr = childrenByParent.get(t.parent) ?? [];
+      arr.push(t.id);
+      childrenByParent.set(t.parent, arr);
+    }
+    const hidden = new Set<string>();
+    const addSubtree = (rootId: string) => {
+      const queue = [rootId];
+      while (queue.length) {
+        const cur = queue.shift()!;
+        if (hidden.has(cur)) continue;
+        hidden.add(cur);
+        const kids = childrenByParent.get(cur) ?? [];
+        queue.push(...kids);
+      }
+    };
+    for (const id of hiddenSubtreeIds) addSubtree(id);
+    if (hiddenUrgencies.size > 0) {
+      for (const t of tasks) {
+        if (t.urgency && hiddenUrgencies.has(t.urgency)) addSubtree(t.id);
+      }
+    }
+    return hidden;
+  }, [tasks, hiddenSubtreeIds, hiddenUrgencies]);
+
+  const initialTasks: GanttTaskRuntime[] = useMemo(() => {
+    // Compute "has children" locally rather than reading
+    // `childCountById` (declared below) — avoids a temporal-dead-zone
+    // reference during render.
+    const parentIds = new Set<string>();
+    for (const t of tasks) {
+      if (t.parent) parentIds.add(t.parent);
+    }
+    return tasks
+      .filter((t) => !filterHiddenIds.has(t.id))
+      .map((t) => {
         const s = new Date(t.start);
         const e = new Date(t.end);
+        // Seed every parent row as open so the chevron on the bar
+        // matches SVAR's initial state. Otherwise the very first
+        // render has our chevron pointing "expanded" while SVAR
+        // shows the row collapsed, and the first click appears to
+        // do nothing.
+        const hasChildren = parentIds.has(t.id);
         return {
           ...t,
           parent: t.parent ?? undefined,
           start: s,
           end: e,
           duration: daysBetween(s, e),
+          ...(hasChildren ? { open: true } : {}),
         };
-      }),
-    [tasks],
+      });
+  }, [tasks, filterHiddenIds]);
+
+  // SVAR will warn / misrender if a link references a hidden task, so
+  // drop any link whose source or target has been filtered out.
+  const visibleLinks = useMemo(
+    () =>
+      filterHiddenIds.size === 0
+        ? links
+        : links.filter(
+            (l) =>
+              !filterHiddenIds.has(l.source) &&
+              !filterHiddenIds.has(l.target),
+          ),
+    [links, filterHiddenIds],
   );
+
+  // Explicit timeline range so SVAR renders the entire date scale up
+  // front instead of lazily filling in ticks as the user scrolls — the
+  // old behavior looked like "dates take a while to populate". We pad
+  // by a couple of weeks on each side so bars aren't flush against the
+  // chart edge and there's room for the today-line / drag-extend.
+  const dateRange = useMemo<{ start: Date; end: Date } | null>(() => {
+    if (!tasks.length) return null;
+    let minMs = Infinity;
+    let maxMs = -Infinity;
+    for (const t of tasks) {
+      const s = new Date(t.start).getTime();
+      const e = new Date(t.end).getTime();
+      if (Number.isFinite(s) && s < minMs) minMs = s;
+      if (Number.isFinite(e) && e > maxMs) maxMs = e;
+    }
+    if (!Number.isFinite(minMs) || !Number.isFinite(maxMs)) return null;
+    // Always include "today" so the red Today line has somewhere to
+    // live even on projects that haven't started yet or are finished.
+    const nowMs = Date.now();
+    minMs = Math.min(minMs, nowMs);
+    maxMs = Math.max(maxMs, nowMs);
+    const pad = 14 * 86_400_000;
+    return { start: new Date(minMs - pad), end: new Date(maxMs + pad) };
+  }, [tasks]);
 
   useEffect(() => {
     const next = new Map<
@@ -652,14 +815,13 @@ export default function GanttClient({
     childCountByIdRef.current = childCountById;
   }, [childCountById]);
 
-  // Row type (EPIC / TASK / ISSUE / MILESTONE) by id. The bar template
-  // needs this to switch to the milestone (star) renderer, and it reads
-  // it via a ref so every task edit doesn't invalidate TaskTemplate.
-  const rowTypeByIdRef = useRef<
-    Map<string, "EPIC" | "TASK" | "ISSUE" | "MILESTONE">
-  >(new Map());
+  // Row type (EPIC / TASK / ISSUE) by id. Read via a ref so every
+  // task edit doesn't invalidate TaskTemplate.
+  const rowTypeByIdRef = useRef<Map<string, "EPIC" | "TASK" | "ISSUE">>(
+    new Map(),
+  );
   useEffect(() => {
-    const m = new Map<string, "EPIC" | "TASK" | "ISSUE" | "MILESTONE">();
+    const m = new Map<string, "EPIC" | "TASK" | "ISSUE">();
     for (const t of tasks) m.set(t.id, t.rowType);
     rowTypeByIdRef.current = m;
   }, [tasks]);
@@ -701,6 +863,451 @@ export default function GanttClient({
   useEffect(() => {
     depthByIdRef.current = depthById;
   }, [depthById]);
+
+  // --- Critical path computation ---------------------------------
+  // For a user-selected target, the "critical path" here is the
+  // predecessor chain that most constrains its start date: at each
+  // fork we follow the predecessor with the latest end date (the one
+  // whose finish is actually pushing the target). We also include the
+  // target's own ancestor chain so the workstream / program that the
+  // path rolls up into visually lights up with it.
+  const predecessorsByTaskId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const l of links) {
+      const arr = m.get(l.target) ?? [];
+      arr.push(l.source);
+      m.set(l.target, arr);
+    }
+    return m;
+  }, [links]);
+
+  const {
+    criticalPathTaskIds,
+    criticalPathLinkIds,
+  }: { criticalPathTaskIds: Set<string>; criticalPathLinkIds: Set<string> } =
+    useMemo(() => {
+      const emptyTasks = new Set<string>();
+      const emptyLinks = new Set<string>();
+      const targetId = criticalPathTargetId;
+      if (!targetId) {
+        return {
+          criticalPathTaskIds: emptyTasks,
+          criticalPathLinkIds: emptyLinks,
+        };
+      }
+      const byId = new Map(tasks.map((t) => [t.id, t] as const));
+      if (!byId.has(targetId)) {
+        return {
+          criticalPathTaskIds: emptyTasks,
+          criticalPathLinkIds: emptyLinks,
+        };
+      }
+
+      const childrenByParent = new Map<string, string[]>();
+      for (const t of tasks) {
+        if (!t.parent) continue;
+        const arr = childrenByParent.get(t.parent) ?? [];
+        arr.push(t.id);
+        childrenByParent.set(t.parent, arr);
+      }
+
+      const pathTasks = new Set<string>();
+      const pathLinks = new Set<string>();
+
+      // Greedy backward walk along the predecessor with the latest
+      // end date — that's the predecessor most actively pushing the
+      // start of the cursor, i.e. the critical edge.
+      const walkBack = (startId: string) => {
+        const seen = new Set<string>();
+        let cursor: string | undefined = startId;
+        while (cursor && !seen.has(cursor)) {
+          seen.add(cursor);
+          pathTasks.add(cursor);
+          const preds = predecessorsByTaskId.get(cursor) ?? [];
+          if (preds.length === 0) break;
+          let bestPred: string | null = null;
+          let bestEndMs = -Infinity;
+          for (const p of preds) {
+            const pt = byId.get(p);
+            if (!pt) continue;
+            const endMs = new Date(pt.end).getTime();
+            if (endMs > bestEndMs) {
+              bestEndMs = endMs;
+              bestPred = p;
+            }
+          }
+          if (!bestPred) break;
+          for (const l of links) {
+            if (l.source === bestPred && l.target === cursor) {
+              pathLinks.add(l.id);
+              break;
+            }
+          }
+          cursor = bestPred;
+        }
+      };
+
+      const target = byId.get(targetId)!;
+      const isParent = (childrenByParent.get(targetId)?.length ?? 0) > 0;
+
+      // The clicked node's own subtree. Used below to scope the
+      // ancestor walk: we explicitly do NOT light up the clicked
+      // target's own parents — the user wants only the target, its
+      // children, and the predecessor chain(s) that feed into it.
+      const subtreeSet = new Set<string>([targetId]);
+
+      if (isParent) {
+        // Clicking a Program or Workstream: light up everything nested
+        // under it + the chain of predecessors feeding into each leaf,
+        // so the user sees "everything that has to happen to get us
+        // here". Walk the subtree, collect all descendants, and run a
+        // predecessor walk from each leaf descendant.
+        const descendants: string[] = [];
+        const queue: string[] = [targetId];
+        while (queue.length) {
+          const cur = queue.shift()!;
+          descendants.push(cur);
+          const kids = childrenByParent.get(cur) ?? [];
+          queue.push(...kids);
+        }
+        for (const id of descendants) {
+          pathTasks.add(id);
+          subtreeSet.add(id);
+        }
+        // Include intra-subtree links (e.g. dependency arrows between
+        // tasks inside the same program).
+        for (const l of links) {
+          if (subtreeSet.has(l.source) && subtreeSet.has(l.target)) {
+            pathLinks.add(l.id);
+          }
+        }
+        // Predecessor chains from every leaf descendant back toward
+        // the project root.
+        for (const id of descendants) {
+          const isLeaf = (childrenByParent.get(id)?.length ?? 0) === 0;
+          if (!isLeaf) continue;
+          walkBack(id);
+        }
+      } else {
+        // Leaf task: classic critical path = chain of predecessors.
+        walkBack(targetId);
+      }
+
+      // Ancestor rollup — only for the feeder chain, not for the
+      // clicked subtree itself. User request: "I dont want its parents
+      // just its children and any parents that might feed into it".
+      // We start from every path task that lives OUTSIDE the target's
+      // subtree (i.e. a predecessor/feeder), then walk up, stopping
+      // the moment we cross into the target's subtree so we never
+      // climb past the clicked node into its own parents.
+      const withAncestors = new Set<string>(pathTasks);
+      for (const id of pathTasks) {
+        if (subtreeSet.has(id)) continue;
+        let p = byId.get(id)?.parent ?? null;
+        while (p) {
+          if (subtreeSet.has(p)) break;
+          if (withAncestors.has(p)) break;
+          withAncestors.add(p);
+          p = byId.get(p)?.parent ?? null;
+        }
+      }
+
+      // target is only used to pin target for type inference; keep for
+      // clarity that we validated its existence above.
+      void target;
+
+      return {
+        criticalPathTaskIds: withAncestors,
+        criticalPathLinkIds: pathLinks,
+      };
+    }, [criticalPathTargetId, tasks, links, predecessorsByTaskId]);
+
+  // When the user focuses a parent (Program/Workstream), auto-expand
+  // every descendant parent so the whole red-highlighted subtree is
+  // visible — matches the user expectation that "click on a program
+  // and a workstream for all the children to auto open up".
+  useEffect(() => {
+    if (!criticalPathTargetId) return;
+    const api = apiRef.current;
+    if (!api) return;
+    const byId = new Map(tasks.map((t) => [t.id, t] as const));
+    const target = byId.get(criticalPathTargetId);
+    if (!target) return;
+    const childrenByParent = new Map<string, string[]>();
+    for (const t of tasks) {
+      if (!t.parent) continue;
+      const arr = childrenByParent.get(t.parent) ?? [];
+      arr.push(t.id);
+      childrenByParent.set(t.parent, arr);
+    }
+    const isParent = (childrenByParent.get(criticalPathTargetId)?.length ?? 0) > 0;
+    if (!isParent) return;
+    const queue: string[] = [criticalPathTargetId];
+    while (queue.length) {
+      const cur = queue.shift()!;
+      const kids = childrenByParent.get(cur) ?? [];
+      if (kids.length === 0) continue;
+      try {
+        api.exec("open-task", { id: cur, mode: true });
+      } catch {
+        /* leaves aren't openable */
+      }
+      queue.push(...kids);
+    }
+  }, [criticalPathTargetId, tasks]);
+
+  // Click a bar (any level) to focus its critical path. We deliberately
+  // listen in the bubble phase so any interactive children in the bar
+  // (drag handles, delete button, issue badge, open-editor hotspot) can
+  // stop propagation and avoid triggering a focus.
+  //
+  // `.task-pill` sets `pointer-events: none` inline so SVAR can keep
+  // owning drag/resize/link-create on the bar's surface — which means
+  // click targets are almost always SVAR elements, not our pill. We
+  // therefore resolve the clicked bar by looking for the nearest
+  // `.wx-bar` ancestor and then digging back inside it for the
+  // `data-bar-id` our TaskTemplate renders.
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const onClick = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (!target) return;
+      // Don't steal clicks that landed in one of our own editors.
+      if (
+        target.closest(
+          ".bar-quick-editor, .deps-modal, .deps-picker, .context-menu, .bq-editor",
+        )
+      )
+        return;
+      // Ignore clicks on interactive controls inside the bar — each
+      // has its own handler and shouldn't hijack critical-path focus.
+      if (
+        target.closest(
+          ".task-delete-btn, .task-pill__open-issues, .task-row-grip, .wx-action-icon, .wx-delete-button-icon, .wx-delete-icon, .wx-button-expand-box, .wx-progress-marker, .wx-progress-wrapper, .wx-line, input, textarea, select, button, a",
+        )
+      ) {
+        return;
+      }
+
+      const wxBar = target.closest(".wx-bar") as HTMLElement | null;
+      if (wxBar) {
+        const inner = wxBar.querySelector(
+          "[data-bar-id]",
+        ) as HTMLElement | null;
+        const id = inner?.getAttribute("data-bar-id");
+        if (id) {
+          setCriticalPathTargetId((prev) => (prev === id ? null : id));
+          return;
+        }
+      }
+
+      // Click in the chart body but not on a bar → clear focus.
+      if (
+        criticalPathTargetIdRef.current &&
+        target.closest(".wx-area, .wx-chart, .wx-bars")
+      ) {
+        setCriticalPathTargetId(null);
+      }
+    };
+    frame.addEventListener("click", onClick);
+    return () => {
+      frame.removeEventListener("click", onClick);
+    };
+  }, []);
+
+  // Esc clears the critical path focus.
+  useEffect(() => {
+    if (!criticalPathTargetId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        // Only steal Escape if nothing else is open (rough heuristic).
+        const hasOpenUI = document.querySelector(
+          ".bar-quick-editor, .deps-modal, .deps-picker, .context-menu, .bq-editor",
+        );
+        if (hasOpenUI) return;
+        setCriticalPathTargetId(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [criticalPathTargetId]);
+
+  // Paint the critical-path highlight in the DOM. SVAR virtualizes
+  // rows and the link SVG is redrawn on every layout change, so we
+  // reapply classes via a MutationObserver rather than rely on a
+  // single pass.
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+
+    const focusActive =
+      criticalPathTaskIds.size > 0 || criticalPathLinkIds.size > 0;
+    frame.classList.toggle("gantt-frame--crit-focus", focusActive);
+
+    const apply = () => {
+      // Bars
+      const bars = frame.querySelectorAll<HTMLElement>("[data-bar-id]");
+      bars.forEach((b) => {
+        const id = b.getAttribute("data-bar-id");
+        if (!id) return;
+        const onPath = criticalPathTaskIds.has(id);
+        b.classList.toggle("task-pill-wrap--crit", onPath);
+        b.classList.toggle(
+          "task-pill-wrap--crit-dim",
+          focusActive && !onPath,
+        );
+      });
+      // Links
+      const links = frame.querySelectorAll<SVGPolylineElement>(
+        "polyline[data-link-id]",
+      );
+      links.forEach((l) => {
+        const id = l.getAttribute("data-link-id");
+        if (!id) return;
+        const onPath = criticalPathLinkIds.has(id);
+        l.classList.toggle("wx-line--crit", onPath);
+        l.classList.toggle("wx-line--crit-dim", focusActive && !onPath);
+      });
+    };
+
+    apply();
+    if (!focusActive) {
+      return () => {
+        frame.classList.remove("gantt-frame--crit-focus");
+      };
+    }
+
+    const mo = new MutationObserver(() => apply());
+    mo.observe(frame, { subtree: true, childList: true, attributes: false });
+
+    return () => {
+      mo.disconnect();
+      frame.classList.remove("gantt-frame--crit-focus");
+      frame
+        .querySelectorAll<HTMLElement>(
+          ".task-pill-wrap--crit, .task-pill-wrap--crit-dim",
+        )
+        .forEach((b) => {
+          b.classList.remove("task-pill-wrap--crit");
+          b.classList.remove("task-pill-wrap--crit-dim");
+        });
+      frame
+        .querySelectorAll<SVGPolylineElement>(
+          "polyline.wx-line--crit, polyline.wx-line--crit-dim",
+        )
+        .forEach((l) => {
+          l.classList.remove("wx-line--crit");
+          l.classList.remove("wx-line--crit-dim");
+        });
+    };
+  }, [criticalPathTaskIds, criticalPathLinkIds]);
+
+  // Hover-to-highlight dependencies. When the user points at a bar, we
+  // light up its direct predecessors, successors, and the links joining
+  // them — a lightweight, always-on preview of what a task blocks /
+  // depends on without having to click. Skipped while a critical-path
+  // focus is active so the two modes don't fight.
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+
+    const outgoing = new Map<string, Array<{ linkId: string; to: string }>>();
+    const incoming = new Map<string, Array<{ linkId: string; from: string }>>();
+    for (const l of links) {
+      const o = outgoing.get(l.source) ?? [];
+      o.push({ linkId: l.id, to: l.target });
+      outgoing.set(l.source, o);
+      const i = incoming.get(l.target) ?? [];
+      i.push({ linkId: l.id, from: l.source });
+      incoming.set(l.target, i);
+    }
+
+    let hoveredId: string | null = null;
+
+    const clearClasses = () => {
+      frame.classList.remove("gantt-frame--dep-hover");
+      frame
+        .querySelectorAll<HTMLElement>(
+          ".task-pill-wrap--dep-hover, .task-pill-wrap--dep-hover-root",
+        )
+        .forEach((el) => {
+          el.classList.remove("task-pill-wrap--dep-hover");
+          el.classList.remove("task-pill-wrap--dep-hover-root");
+        });
+      frame
+        .querySelectorAll<SVGPolylineElement>("polyline.wx-line--dep-hover")
+        .forEach((el) => el.classList.remove("wx-line--dep-hover"));
+    };
+
+    const applyFor = (id: string) => {
+      const relatedTasks = new Set<string>();
+      const relatedLinks = new Set<string>();
+      for (const o of outgoing.get(id) ?? []) {
+        relatedTasks.add(o.to);
+        relatedLinks.add(o.linkId);
+      }
+      for (const i of incoming.get(id) ?? []) {
+        relatedTasks.add(i.from);
+        relatedLinks.add(i.linkId);
+      }
+      clearClasses();
+      if (relatedTasks.size === 0 && relatedLinks.size === 0) return;
+      frame.classList.add("gantt-frame--dep-hover");
+      frame
+        .querySelectorAll<HTMLElement>("[data-bar-id]")
+        .forEach((el) => {
+          const bid = el.getAttribute("data-bar-id");
+          if (!bid) return;
+          if (bid === id) {
+            el.classList.add("task-pill-wrap--dep-hover-root");
+          } else if (relatedTasks.has(bid)) {
+            el.classList.add("task-pill-wrap--dep-hover");
+          }
+        });
+      frame
+        .querySelectorAll<SVGPolylineElement>("polyline[data-link-id]")
+        .forEach((el) => {
+          const lid = el.getAttribute("data-link-id");
+          if (lid && relatedLinks.has(lid)) el.classList.add("wx-line--dep-hover");
+        });
+    };
+
+    const onOver = (ev: MouseEvent) => {
+      // Don't overwrite the click-focused critical-path highlight.
+      if (criticalPathTargetIdRef.current) return;
+      const target = ev.target as HTMLElement | null;
+      if (!target) return;
+      const wxBar = target.closest(".wx-bar") as HTMLElement | null;
+      if (!wxBar) {
+        if (hoveredId) {
+          hoveredId = null;
+          clearClasses();
+        }
+        return;
+      }
+      const inner = wxBar.querySelector("[data-bar-id]") as HTMLElement | null;
+      const id = inner?.getAttribute("data-bar-id");
+      if (!id || id === hoveredId) return;
+      hoveredId = id;
+      applyFor(id);
+    };
+
+    const onLeave = (ev: MouseEvent) => {
+      const to = ev.relatedTarget as Node | null;
+      if (to && frame.contains(to)) return;
+      hoveredId = null;
+      clearClasses();
+    };
+
+    frame.addEventListener("mouseover", onOver);
+    frame.addEventListener("mouseleave", onLeave);
+    return () => {
+      frame.removeEventListener("mouseover", onOver);
+      frame.removeEventListener("mouseleave", onLeave);
+      clearClasses();
+    };
+  }, [links, tasks]);
 
   // Per-task open-issue indicator state. Held in a ref so TaskTemplate
   // can read without re-memoizing on every prop change.
@@ -745,22 +1352,6 @@ export default function GanttClient({
     const pct = Math.max(0, Math.min(100, Number(data?.progress ?? 0)));
     const overdue = data?.end ? isOverdue(data.end, pct) : false;
     const childCount = childCountByIdRef.current.get(id) ?? 0;
-    const rowType = rowTypeByIdRef.current.get(id);
-
-    // Milestones are anchored points on the timeline — not bars. Render
-    // a flashing golden star (see .milestone-star keyframes) centered
-    // on the milestone's date. `overflow: visible` in CSS lets the star
-    // bleed past SVAR's zero-width milestone bar so it's clearly visible.
-    if (rowType === "MILESTONE") {
-      return (
-        <MilestoneBar
-          id={id}
-          label={data?.text ?? ""}
-          done={pct >= 100}
-          overdue={overdue}
-        />
-      );
-    }
 
     // Color by hierarchy LEVEL, not "has children". Previously a
     // workstream with no children rendered as a leaf (urgency-colored),
@@ -878,6 +1469,30 @@ export default function GanttClient({
 
     const owner = (data?.assignee ?? "").trim();
 
+    // In-bar expand/collapse chevron for Programs / Workstreams.
+    // Local state keeps the chevron's orientation in sync with
+    // whatever toggled the row — our chevron click, Expand all,
+    // critical-path auto-expand, etc. — by listening for the
+    // `gantt-open-toggle` CustomEvent dispatched from the api.on
+    // "open-task" handler.
+    const hasChildBars = isParentBar && childCount > 0;
+    const [isOpen, setIsOpen] = useState<boolean>(() =>
+      openByIdRef.current.get(id) ?? true,
+    );
+    useEffect(() => {
+      if (!hasChildBars) return;
+      const onToggle = (ev: Event) => {
+        const ce = ev as CustomEvent<{ id: string; mode: boolean }>;
+        if (!ce.detail) return;
+        if (ce.detail.id !== id) return;
+        setIsOpen(Boolean(ce.detail.mode));
+      };
+      window.addEventListener("gantt-open-toggle", onToggle);
+      return () => {
+        window.removeEventListener("gantt-open-toggle", onToggle);
+      };
+    }, [id, hasChildBars]);
+
     return (
       <div
         className="task-pill-wrap"
@@ -904,6 +1519,45 @@ export default function GanttClient({
             className="task-pill__fill"
             style={{ width: `${pct}%`, background: colors.fill }}
           />
+          {hasChildBars ? (
+            <button
+              type="button"
+              className={
+                "task-pill__expand" + (isOpen ? " is-open" : "")
+              }
+              style={{ pointerEvents: "auto" }}
+              title={isOpen ? "Collapse children" : "Expand children"}
+              aria-label={isOpen ? "Collapse children" : "Expand children"}
+              aria-expanded={isOpen}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                const next = !isOpen;
+                setIsOpen(next);
+                openByIdRef.current.set(id, next);
+                try {
+                  apiRef.current?.exec("open-task", { id, mode: next });
+                } catch {
+                  /* leaves or already-disposed api */
+                }
+              }}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="12"
+                height="12"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <polyline points="9 6 15 12 9 18" />
+              </svg>
+            </button>
+          ) : null}
           <div className="task-pill__text">
             {visibleLabel ? (
               <span className="task-pill__name">{visibleLabel}</span>
@@ -1912,6 +2566,25 @@ export default function GanttClient({
   }) {
     apiRef.current = api;
 
+    // Track open/closed state for parent rows. The in-bar chevron
+    // rendered by TaskTemplate reads from this ref to draw itself
+    // pointing right (closed) or down (open) and we broadcast a
+    // custom event so live templates can re-render.
+    api.on("open-task", (raw: unknown) => {
+      const d = raw as { id?: string | number; mode?: boolean };
+      if (d == null || d.id == null) return;
+      const id = String(d.id);
+      const mode = Boolean(d.mode);
+      openByIdRef.current.set(id, mode);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("gantt-open-toggle", {
+            detail: { id, mode },
+          }),
+        );
+      }
+    });
+
     api.on("update-task", (raw: unknown) => {
       const data = raw as {
         id: string;
@@ -2370,91 +3043,6 @@ export default function GanttClient({
       setTimeout(() => setStatus(""), 4500);
     } catch (e: unknown) {
       setStatus(e instanceof Error ? e.message : "Create task failed");
-    } finally {
-      setAddingTask(false);
-    }
-  }
-
-  /**
-   * Create a milestone attached to the end of a parent task (typically a
-   * workstream). The milestone's start = end = parent.endDate, so it
-   * snaps to the parent's finish line on the Gantt chart. Default title
-   * is the parent's name + "complete" — the user can rename it in the
-   * grid. Works even when no parent is given (floats at "today" as a
-   * free-standing milestone that can be dragged to snap onto a parent).
-   */
-  async function createMilestone(parentId: string | null) {
-    if (addingTask) return;
-    const parent = parentId ? tasks.find((t) => t.id === parentId) : null;
-    // Prompt for a name up front — milestones are usually deliverables
-    // (e.g. "FAT complete", "Tapeout", "Power-on") that don't always
-    // share the parent workstream's name, so defaulting silently is
-    // wrong most of the time. Parent name is offered as a starting
-    // point; the user can clear it or replace entirely.
-    const suggested = parent ? `${parent.text} complete` : "New milestone";
-    const raw =
-      typeof window !== "undefined"
-        ? window.prompt("Milestone name", suggested)
-        : suggested;
-    if (raw === null) return; // user cancelled
-    const title = raw.trim() || suggested;
-
-    setAddingTask(true);
-    setStatus(
-      parentId
-        ? `Adding milestone at end of ${
-            parent?.text ?? "parent"
-          }…`
-        : "Adding milestone…",
-    );
-    try {
-      // Milestones are zero-duration (startDate === endDate) and the
-      // backend rollup excludes MILESTONE from the parent's span, so
-      // putting one on the parent's exact endDate timestamp won't push
-      // the parent out. We deliberately DON'T call setHours() here —
-      // shifting to a fixed local hour can flip the calendar day in
-      // timezones where the parent's end lands near midnight UTC, which
-      // was offsetting the star by a day on the chart.
-      const date = parent ? new Date(parent.end) : new Date();
-      const res = await fetch("/api/tasks", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          title,
-          description: "",
-          type: "MILESTONE",
-          status: "TODO",
-          parentId: parentId ?? undefined,
-          startDate: date,
-          endDate: date,
-          progress: 0,
-          sortOrder: 9999,
-          tags: [],
-        }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const created = (await res.json()) as { id?: string };
-      markSaved();
-      setStatus("Milestone added.");
-      router.refresh();
-      setTimeout(() => setStatus(""), 1400);
-      if (created?.id) {
-        const newId = created.id;
-        pushUndo({
-          label: `milestone ${title}`,
-          run: async () => {
-            await fetch(`/api/tasks/${newId}?mode=cascade`, { method: "DELETE" });
-            try {
-              apiRef.current?.exec("delete-task", { id: newId });
-            } catch {
-              /* already gone */
-            }
-            router.refresh();
-          },
-        });
-      }
-    } catch (e: unknown) {
-      setStatus(e instanceof Error ? e.message : "Create milestone failed");
     } finally {
       setAddingTask(false);
     }
@@ -3275,7 +3863,7 @@ export default function GanttClient({
         api.exec("open-task", { id: t.id, mode: expanded });
         touched++;
       } catch {
-        /* some rows may not be openable (milestones, leaves) */
+        /* some rows may not be openable (leaves) */
       }
     }
     setStatus(
@@ -3489,6 +4077,56 @@ export default function GanttClient({
               {z[0].toUpperCase() + z.slice(1)}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={() => {
+              if (!dateRange) return;
+              const days =
+                (dateRange.end.getTime() - dateRange.start.getTime()) /
+                86_400_000;
+              const next = pickZoomForSpanDays(days);
+              setZoom(next);
+              // After the scale re-renders, scroll so the earliest
+              // task sits just inside the timeline's left edge. SVAR
+              // keeps scrolling state on the outer gantt frame.
+              requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                  const frame = frameRef.current;
+                  if (!frame) return;
+                  let earliestLeft = Infinity;
+                  let earliestEl: HTMLElement | null = null;
+                  frame
+                    .querySelectorAll<HTMLElement>("[data-bar-id]")
+                    .forEach((el) => {
+                      const r = el.getBoundingClientRect();
+                      if (r.width === 0) return;
+                      if (r.left < earliestLeft) {
+                        earliestLeft = r.left;
+                        earliestEl = el;
+                      }
+                    });
+                  if (!earliestEl) return;
+                  const area =
+                    (frame.querySelector(".wx-area") as HTMLElement | null) ??
+                    (frame.querySelector(".wx-chart") as HTMLElement | null);
+                  if (!area) return;
+                  const areaRect = area.getBoundingClientRect();
+                  const barRect = (
+                    earliestEl as HTMLElement
+                  ).getBoundingClientRect();
+                  area.scrollBy({
+                    left: barRect.left - areaRect.left - 72,
+                    behavior: "smooth",
+                  });
+                });
+              });
+            }}
+            className="gantt-zoom-btn"
+            title="Fit the whole project in view"
+            disabled={!dateRange}
+          >
+            Fit
+          </button>
         </div>
         <div className="gantt-controls-divider" aria-hidden />
         <div className="gantt-search" role="search">
@@ -3572,6 +4210,16 @@ export default function GanttClient({
             </button>
           )}
         </div>
+        <GanttFilterMenu
+          ref={filterMenuRef}
+          open={filterOpen}
+          setOpen={setFilterOpen}
+          tasks={tasks}
+          hiddenSubtreeIds={hiddenSubtreeIds}
+          setHiddenSubtreeIds={setHiddenSubtreeIds}
+          hiddenUrgencies={hiddenUrgencies}
+          setHiddenUrgencies={setHiddenUrgencies}
+        />
         <button
           type="button"
           onClick={() => setAllExpanded(true)}
@@ -3668,25 +4316,6 @@ export default function GanttClient({
         </button>
         <button
           type="button"
-          onClick={() => void createMilestone(null)}
-          className="gantt-linkmode-btn"
-          title="Add a milestone. Right-click a workstream to attach one to its end date."
-          disabled={addingTask}
-        >
-          <svg
-            viewBox="0 0 24 24"
-            width="12"
-            height="12"
-            fill="currentColor"
-            aria-hidden="true"
-            style={{ marginRight: 5, verticalAlign: "-1px" }}
-          >
-            <path d="M12 1 Q12.55 11.45 23 12 Q12.55 12.55 12 23 Q11.45 12.55 1 12 Q11.45 11.45 12 1 Z" />
-          </svg>
-          Milestone
-        </button>
-        <button
-          type="button"
           onClick={autoChainDependencies}
           className="gantt-linkmode-btn"
           title="Create sequential dependencies with one click"
@@ -3707,6 +4336,20 @@ export default function GanttClient({
         >
           ↶ Undo
         </button>
+        {criticalPathTargetId ? (
+          <button
+            type="button"
+            onClick={() => setCriticalPathTargetId(null)}
+            className="gantt-linkmode-btn gantt-crit-clear"
+            title="Clear critical-path highlight (Esc)"
+          >
+            <span className="gantt-crit-dot" aria-hidden />
+            Clear critical path
+            <span className="gantt-crit-target">
+              {tasks.find((t) => t.id === criticalPathTargetId)?.text ?? ""}
+            </span>
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={() => {
@@ -3739,7 +4382,7 @@ export default function GanttClient({
           <Theme>
             <Gantt
               tasks={initialTasks}
-              links={links}
+              links={visibleLinks}
               scales={scales}
               zoom={false}
               columns={columns}
@@ -3749,97 +4392,17 @@ export default function GanttClient({
               cellBorders="full"
               init={init}
               taskTemplate={TaskTemplate}
+              {...(dateRange
+                ? { start: dateRange.start, end: dateRange.end }
+                : {})}
             />
           </Theme>
         )}
         {tasks.length > 0 ? (
           <HierarchyOverlay tasks={tasks} frameRef={frameRef} />
         ) : null}
-        {milestones.length > 0 ? (
-          <MilestoneOverlay
-            milestones={milestones}
-            tasks={tasks}
-            frameRef={frameRef}
-            onDelete={async (id, title) => {
-              if (
-                !window.confirm(
-                  `Delete milestone "${title}"? This can be undone with ⌘Z.`,
-                )
-              )
-                return;
-              // Snapshot for undo before we nuke it.
-              const snap = milestones.find((m) => m.id === id);
-              try {
-                await fetch(`/api/tasks/${id}?mode=cascade`, {
-                  method: "DELETE",
-                });
-                setStatus("Milestone deleted.");
-                router.refresh();
-                setTimeout(() => setStatus(""), 1000);
-                if (snap) {
-                  pushUndo({
-                    label: `delete milestone ${snap.title}`,
-                    run: async () => {
-                      await fetch("/api/tasks", {
-                        method: "POST",
-                        headers: { "content-type": "application/json" },
-                        body: JSON.stringify({
-                          title: snap.title,
-                          description: "",
-                          type: "MILESTONE",
-                          status: "TODO",
-                          parentId: snap.parentId,
-                          startDate: snap.date,
-                          endDate: snap.date,
-                          progress: snap.progress ?? 0,
-                          sortOrder: 9999,
-                          tags: [],
-                        }),
-                      });
-                      router.refresh();
-                    },
-                  });
-                }
-              } catch (err) {
-                setStatus(
-                  err instanceof Error
-                    ? `Delete failed: ${err.message}`
-                    : "Delete failed",
-                );
-              }
-            }}
-            onRename={async (id, oldTitle) => {
-              const next = window.prompt("Milestone name", oldTitle);
-              if (next === null) return;
-              const title = next.trim();
-              if (!title || title === oldTitle) return;
-              try {
-                await fetch(`/api/tasks/${id}`, {
-                  method: "PATCH",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify({ title }),
-                });
-                router.refresh();
-                pushUndo({
-                  label: `rename milestone`,
-                  run: async () => {
-                    await fetch(`/api/tasks/${id}`, {
-                      method: "PATCH",
-                      headers: { "content-type": "application/json" },
-                      body: JSON.stringify({ title: oldTitle }),
-                    });
-                    router.refresh();
-                  },
-                });
-              } catch (err) {
-                setStatus(
-                  err instanceof Error
-                    ? `Rename failed: ${err.message}`
-                    : "Rename failed",
-                );
-              }
-            }}
-          />
+        {tasks.length > 0 ? (
+          <TodayOverlay tasks={tasks} frameRef={frameRef} />
         ) : null}
       </div>
       {depEditorTaskId && (
@@ -4048,48 +4611,6 @@ export default function GanttClient({
               Create Issue from Task
             </button>
           )}
-          {contextMenu.scope.length === 1 &&
-            (() => {
-              const row = tasks.find((t) => t.id === contextMenu.taskId);
-              if (!row || row.rowType === "MILESTONE") return null;
-              // Quote-truncate the parent's label so the menu stays narrow
-              // even on chatty workstream names.
-              const raw = row.text ?? "this row";
-              const name = raw.length > 36 ? raw.slice(0, 34) + "…" : raw;
-              const endLabel = row.end
-                ? shortDate(new Date(row.end))
-                : "end date";
-              return (
-                <button
-                  type="button"
-                  className="task-context-item task-context-item--milestone"
-                  onClick={() => {
-                    const id = contextMenu.taskId;
-                    setContextMenu(null);
-                    void createMilestone(id);
-                  }}
-                  title={`Drop a milestone star on ${endLabel}, the current end of "${raw}"`}
-                >
-                  <span className="task-context-icon" aria-hidden="true">
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="14"
-                      height="14"
-                      fill="#ef4444"
-                      stroke="#7f1d1d"
-                      strokeWidth="0.6"
-                      strokeLinejoin="round"
-                    >
-                      <path d="M12 1 Q12.55 11.45 23 12 Q12.55 12.55 12 23 Q11.45 12.55 1 12 Q11.45 11.45 12 1 Z" />
-                    </svg>
-                  </span>
-                  <span className="task-context-label">
-                    <span>Add milestone at end of</span>
-                    <span className="task-context-parent">“{name}”</span>
-                  </span>
-                </button>
-              );
-            })()}
           <button
             type="button"
             className="task-context-item"
@@ -4473,67 +4994,6 @@ function DepsPicker({
   );
 }
 
-/**
- * Bar template used when a row's rowType is MILESTONE. Renders a
- * flashing gold star centered on the milestone's date. Kept as its
- * own component so TaskTemplate stays referentially stable for leaf
- * bars — swapping the template tree across every re-render would
- * thrash SVAR's internal DOM.
- */
-function MilestoneBar({
-  id,
-  label,
-  done,
-  overdue,
-}: {
-  id: string;
-  label: string;
-  done: boolean;
-  overdue: boolean;
-}) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const stateClass =
-    (done ? " milestone-star--done" : " milestone-star--open") +
-    (overdue ? " milestone-star--overdue" : "");
-  return (
-    <div
-      ref={ref}
-      data-bar-id={id}
-      className={"milestone-star" + stateClass}
-      title={label ? `Milestone: ${label}` : "Milestone"}
-    >
-      {/* The star "core" is absolutely centered on the bar's X so it
-          sits exactly on the milestone's date tick. The label is a
-          separate absolutely-positioned element floated to the right
-          of the core so it never pushes the star off-axis. */}
-      <span className="milestone-star__core" aria-hidden="true">
-        <span className="milestone-star__glow" />
-        <svg
-          viewBox="0 0 24 24"
-          width="34"
-          height="34"
-          aria-hidden="true"
-          focusable="false"
-          className="milestone-star__svg"
-        >
-          {/* Four-point sparkle: each arm is a sharp cusp with deep
-              concave curves between it and its neighbors. Control
-              points near center (≈11.45 / 12.55) give the pinched waist. */}
-          <path
-            d="M12 1
-               Q12.55 11.45 23 12
-               Q12.55 12.55 12 23
-               Q11.45 12.55 1 12
-               Q11.45 11.45 12 1 Z"
-            className="milestone-star__glyph"
-          />
-        </svg>
-      </span>
-      {label ? <span className="milestone-star__label">{label}</span> : null}
-    </div>
-  );
-}
-
 function shortDate(d: Date) {
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -4685,31 +5145,22 @@ function HierarchyOverlay({
 }
 
 /**
- * Floating overlay that paints a milestone star on its PARENT's row
- * instead of occupying a dedicated SVAR row. Works exactly like
- * HierarchyOverlay (DOM-driven, coalesced by MutationObserver /
- * ResizeObserver / scroll), but places a star + label pill at the
- * milestone's date along the parent bar.
+ * Renders a single red vertical line that marks "today" across the
+ * Gantt's timeline. We derive a pixels-per-millisecond ratio from the
+ * first rendered task bar (data-bar-id → DOM rect + known start/end
+ * dates from the tasks prop) so the line stays anchored through
+ * scroll, resize, and zoom without needing to reach into SVAR's
+ * internal time scale.
  *
- * Coordinate logic: we use the parent's bar DOM rect as our only
- * reference. The milestone's X along the parent bar is the linear
- * interpolation of its date between parent.start and parent.end. This
- * means we don't have to read SVAR's internal time scale — we just
- * ride the parent's rendered geometry, which is already correct at
- * every zoom level and after every drag.
+ * If the timeline doesn't yet contain any rendered bars (e.g. empty
+ * state) the overlay silently renders nothing.
  */
-function MilestoneOverlay({
-  milestones,
+function TodayOverlay({
   tasks,
   frameRef,
-  onDelete,
-  onRename,
 }: {
-  milestones: AttachedMilestone[];
   tasks: GanttTaskInput[];
   frameRef: React.RefObject<HTMLDivElement | null>;
-  onDelete: (id: string, title: string) => void;
-  onRename: (id: string, title: string) => void;
 }) {
   const [tick, setTick] = useState(0);
 
@@ -4741,6 +5192,16 @@ function MilestoneOverlay({
     frame.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", schedule);
 
+    // Repaint at midnight so the line moves without a page refresh.
+    const now = new Date();
+    const msUntilMidnight =
+      new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + 1,
+      ).getTime() - now.getTime();
+    const timer = window.setTimeout(schedule, msUntilMidnight + 1000);
+
     schedule();
     return () => {
       cancelAnimationFrame(raf);
@@ -4748,123 +5209,88 @@ function MilestoneOverlay({
       mo.disconnect();
       frame.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", schedule);
+      window.clearTimeout(timer);
     };
   }, [frameRef]);
 
-  const parentRangeById = useMemo(() => {
-    const m = new Map<string, { start: number; end: number }>();
-    for (const t of tasks) {
-      m.set(t.id, {
-        start: new Date(t.start).getTime(),
-        end: new Date(t.end).getTime(),
-      });
-    }
-    return m;
-  }, [tasks]);
-
-  const now = Date.now();
-  const items = useMemo(() => {
+  const placement = useMemo(() => {
     const frame = frameRef.current;
-    if (!frame) return [] as Array<{
-      id: string;
-      title: string;
-      x: number;
-      y: number;
-      done: boolean;
-      overdue: boolean;
-    }>;
-    const frameRect = frame.getBoundingClientRect();
-    const out: Array<{
-      id: string;
-      title: string;
-      x: number;
-      y: number;
-      done: boolean;
-      overdue: boolean;
-    }> = [];
-    for (const m of milestones) {
-      const parentEl = frame.querySelector(
-        `[data-bar-id="${CSS.escape(m.parentId)}"]`,
-      ) as HTMLElement | null;
-      if (!parentEl) continue;
-      const pRect = parentEl.getBoundingClientRect();
-      // Ignore parents that aren't currently rendered (virtualized out
-      // of view) — their rect collapses to zero and would place the
-      // star at 0,0.
-      if (pRect.width < 1 || pRect.height < 1) continue;
-      const range = parentRangeById.get(m.parentId);
-      const mDate = new Date(m.date).getTime();
-      let frac = 1; // default to right edge if we can't compute
-      if (range && range.end > range.start) {
-        frac = (mDate - range.start) / (range.end - range.start);
-      }
-      frac = Math.max(0, Math.min(1, frac));
-      const x = pRect.left - frameRect.left + frac * pRect.width;
-      // Row center is more reliable than the bar center when SVAR is
-      // showing a summary bar at a different height.
-      const rowEl = parentEl.closest(".wx-row") as HTMLElement | null;
-      const rowRect = rowEl?.getBoundingClientRect() ?? pRect;
-      const y = rowRect.top - frameRect.top + rowRect.height / 2;
-      const done = (m.progress ?? 0) >= 100;
-      const overdue = !done && mDate < now;
-      out.push({ id: m.id, title: m.title, x, y, done, overdue });
+    if (!frame) return null;
+    // Chart area so we only paint over the timeline (not the table).
+    // SVAR renders the bars inside `.wx-area`; fall back to `.wx-chart`
+    // for older builds.
+    const area = (frame.querySelector(".wx-area") ??
+      frame.querySelector(".wx-chart")) as HTMLElement | null;
+    if (!area) return null;
+
+    // Anchor to the widest rendered bar we can find, so pixels-per-ms
+    // is as precise as possible. Skip unplaced ghosts (0 width).
+    let anchorEl: HTMLElement | null = null;
+    let anchorStart = 0;
+    let anchorEnd = 0;
+    let bestWidth = 0;
+    const byId = new Map(tasks.map((t) => [t.id, t] as const));
+    const bars = frame.querySelectorAll<HTMLElement>("[data-bar-id]");
+    for (const el of Array.from(bars)) {
+      const id = el.getAttribute("data-bar-id");
+      if (!id) continue;
+      const t = byId.get(id);
+      if (!t) continue;
+      const s = new Date(t.start).getTime();
+      const e = new Date(t.end).getTime();
+      if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= bestWidth) continue;
+      bestWidth = r.width;
+      anchorEl = el;
+      anchorStart = s;
+      anchorEnd = e;
     }
-    return out;
+    if (!anchorEl) return null;
+
+    // Positioning reference is the chart area itself so our "x" lives
+    // in the same content coordinate system that the area occupies.
+    // That way, when the user scrolls the frame horizontally, we
+    // redraw relative to the same origin and the line stays pinned
+    // to today's date visually.
+    const areaRect = area.getBoundingClientRect();
+    const aRect = anchorEl.getBoundingClientRect();
+    const msPerPx = (anchorEnd - anchorStart) / aRect.width;
+    if (!Number.isFinite(msPerPx) || msPerPx <= 0) return null;
+    // Anchor's left edge expressed in area-relative pixels:
+    const anchorLeftInArea = aRect.left - areaRect.left;
+    const todayMs = Date.now();
+    const xInArea = anchorLeftInArea + (todayMs - anchorStart) / msPerPx;
+
+    // Hide if today is outside the full timeline (clamp by a few px).
+    if (xInArea < -2 || xInArea > areaRect.width + 2) return null;
+
+    return {
+      xInArea,
+      areaHeight: area.offsetHeight || areaRect.height,
+      areaEl: area,
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick, milestones, parentRangeById]);
+  }, [tick, tasks]);
 
-  if (items.length === 0) return null;
-
-  return (
-    <div className="milestone-overlay" aria-hidden="false">
-      {items.map((m) => {
-        const stateClass =
-          (m.done
-            ? " milestone-star--done"
-            : " milestone-star--open") +
-          (m.overdue ? " milestone-star--overdue" : "");
-        return (
-          <div
-            key={m.id}
-            className={
-              "milestone-overlay__marker milestone-star" + stateClass
-            }
-            style={{ left: m.x, top: m.y }}
-            title={`Milestone: ${m.title} — click to rename, shift-click to delete`}
-            data-milestone-id={m.id}
-            onClick={(e) => {
-              if (e.shiftKey) {
-                onDelete(m.id, m.title);
-              } else {
-                onRename(m.id, m.title);
-              }
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              onDelete(m.id, m.title);
-            }}
-          >
-            <span className="milestone-star__core" aria-hidden="true">
-              <span className="milestone-star__glow" />
-              <svg
-                viewBox="0 0 24 24"
-                width="34"
-                height="34"
-                aria-hidden="true"
-                focusable="false"
-                className="milestone-star__svg"
-              >
-                <path
-                  d="M12 1 Q12.55 11.45 23 12 Q12.55 12.55 12 23 Q11.45 12.55 1 12 Q11.45 11.45 12 1 Z"
-                  className="milestone-star__glyph"
-                />
-              </svg>
-            </span>
-            <span className="milestone-star__label">{m.title}</span>
-          </div>
-        );
-      })}
-    </div>
+  // Render the line as a child of `.wx-area` via a portal. That makes
+  // `left: X` live in the area's own content coordinate system, which
+  // scrolls naturally with the timeline without any math on our side.
+  if (!placement) return null;
+  return createPortal(
+    <div
+      className="today-overlay"
+      aria-hidden="false"
+      style={{
+        left: placement.xInArea,
+        top: 0,
+        height: placement.areaHeight,
+      }}
+    >
+      <span className="today-overlay__tick" aria-hidden="true" />
+      <span className="today-overlay__label">Today</span>
+    </div>,
+    placement.areaEl,
   );
 }
 
@@ -5672,3 +6098,229 @@ function formatRelative(ts: number, _tick: number): string {
   const d = new Date(ts);
   return d.toLocaleString();
 }
+
+/**
+ * Notion-style filter menu rendered inline in the Gantt toolbar. Lets
+ * the user hide Programs / Workstreams (uncheck a row → the whole
+ * subtree disappears from the chart) and hide tasks by urgency. All
+ * state is controlled by the parent so filter choices can participate
+ * in the same memoized data pipeline as the Gantt itself.
+ */
+const GanttFilterMenu = forwardRef<
+  HTMLDivElement,
+  {
+    open: boolean;
+    setOpen: (v: boolean) => void;
+    tasks: GanttTaskInput[];
+    hiddenSubtreeIds: Set<string>;
+    setHiddenSubtreeIds: React.Dispatch<React.SetStateAction<Set<string>>>;
+    hiddenUrgencies: Set<"high" | "medium" | "low">;
+    setHiddenUrgencies: React.Dispatch<
+      React.SetStateAction<Set<"high" | "medium" | "low">>
+    >;
+  }
+>(function GanttFilterMenu(
+  {
+    open,
+    setOpen,
+    tasks,
+    hiddenSubtreeIds,
+    setHiddenSubtreeIds,
+    hiddenUrgencies,
+    setHiddenUrgencies,
+  },
+  ref,
+) {
+  // Build the two-level tree (Program → Workstreams) we show in the
+  // menu. We intentionally stop at depth 1 — showing every leaf task
+  // would make the dropdown unusable on real programs.
+  const tree = useMemo(() => {
+    const programs = tasks.filter((t) => !t.parent);
+    const childrenOf = (pid: string) =>
+      tasks.filter((t) => t.parent === pid);
+    return programs.map((p) => ({
+      program: p,
+      workstreams: childrenOf(p.id),
+    }));
+  }, [tasks]);
+
+  const activeCount = hiddenSubtreeIds.size + hiddenUrgencies.size;
+
+  const toggleSubtree = (id: string) => {
+    setHiddenSubtreeIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const toggleUrgency = (u: "high" | "medium" | "low") => {
+    setHiddenUrgencies((prev) => {
+      const next = new Set(prev);
+      if (next.has(u)) next.delete(u);
+      else next.add(u);
+      return next;
+    });
+  };
+  const clearAll = () => {
+    setHiddenSubtreeIds(new Set());
+    setHiddenUrgencies(new Set());
+  };
+
+  const URGENCIES: Array<{
+    key: "high" | "medium" | "low";
+    label: string;
+    dot: string;
+  }> = [
+    { key: "high", label: "High", dot: "#ef4444" },
+    { key: "medium", label: "Medium", dot: "#f59e0b" },
+    { key: "low", label: "Low", dot: "#22c55e" },
+  ];
+
+  return (
+    <div className="gantt-filter" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className={
+          "gantt-linkmode-btn" + (activeCount > 0 ? " is-active" : "")
+        }
+        title="Hide or show parts of the chart"
+        aria-haspopup="true"
+        aria-expanded={open}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="13"
+          height="13"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ marginRight: 5, verticalAlign: "-1px" }}
+          aria-hidden="true"
+        >
+          <path d="M4 5h16" />
+          <path d="M7 12h10" />
+          <path d="M10 19h4" />
+        </svg>
+        Filter
+        {activeCount > 0 ? (
+          <span className="gantt-filter__count">{activeCount}</span>
+        ) : null}
+      </button>
+      {open ? (
+        <div
+          className="gantt-filter__menu"
+          role="dialog"
+          aria-label="Filter tasks"
+        >
+          <div className="gantt-filter__header">
+            <span>Show on board</span>
+            {activeCount > 0 ? (
+              <button
+                type="button"
+                className="gantt-filter__clear"
+                onClick={clearAll}
+              >
+                Reset
+              </button>
+            ) : null}
+          </div>
+
+          <div className="gantt-filter__section">
+            <div className="gantt-filter__section-title">Urgency</div>
+            <div className="gantt-filter__chips">
+              {URGENCIES.map((u) => {
+                const hidden = hiddenUrgencies.has(u.key);
+                return (
+                  <button
+                    key={u.key}
+                    type="button"
+                    onClick={() => toggleUrgency(u.key)}
+                    className={
+                      "gantt-filter__chip" + (hidden ? " is-off" : "")
+                    }
+                    aria-pressed={!hidden}
+                    title={
+                      hidden
+                        ? `Show ${u.label.toLowerCase()}-urgency tasks`
+                        : `Hide ${u.label.toLowerCase()}-urgency tasks`
+                    }
+                  >
+                    <span
+                      className="gantt-filter__chip-dot"
+                      style={{ background: u.dot }}
+                      aria-hidden="true"
+                    />
+                    {u.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="gantt-filter__section">
+            <div className="gantt-filter__section-title">
+              Programs &amp; workstreams
+            </div>
+            {tree.length === 0 ? (
+              <div className="gantt-filter__empty">
+                No programs yet. Create a task to start organizing your
+                board.
+              </div>
+            ) : (
+              <div className="gantt-filter__tree">
+                {tree.map(({ program, workstreams }) => {
+                  const programHidden = hiddenSubtreeIds.has(program.id);
+                  return (
+                    <div key={program.id} className="gantt-filter__group">
+                      <label className="gantt-filter__row is-program">
+                        <input
+                          type="checkbox"
+                          checked={!programHidden}
+                          onChange={() => toggleSubtree(program.id)}
+                        />
+                        <span className="gantt-filter__row-label">
+                          {program.text}
+                        </span>
+                      </label>
+                      {workstreams.length > 0 ? (
+                        <div className="gantt-filter__children">
+                          {workstreams.map((ws) => {
+                            const wsHidden =
+                              programHidden || hiddenSubtreeIds.has(ws.id);
+                            return (
+                              <label
+                                key={ws.id}
+                                className={
+                                  "gantt-filter__row" +
+                                  (programHidden ? " is-disabled" : "")
+                                }
+                              >
+                                <input
+                                  type="checkbox"
+                                  disabled={programHidden}
+                                  checked={!wsHidden}
+                                  onChange={() => toggleSubtree(ws.id)}
+                                />
+                                <span className="gantt-filter__row-label">
+                                  {ws.text}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+});

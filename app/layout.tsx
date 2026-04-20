@@ -46,7 +46,7 @@ export default function RootLayout({
               <div className="app-sidebar-card space-y-2 p-3 text-xs text-muted-foreground">
                 <p>Daily standup items</p>
                 <p>Procurement blockers</p>
-                <p>Upcoming parent milestones</p>
+                <p>Upcoming workstream kickoffs</p>
               </div>
             </div>
           </aside>

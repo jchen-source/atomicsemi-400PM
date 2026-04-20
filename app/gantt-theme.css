@@ -173,6 +173,178 @@
   margin: 0 2px;
 }
 
+/* Notion-style filter menu (toolbar button + floating popover). */
+.gantt-filter {
+  position: relative;
+  display: inline-flex;
+}
+.gantt-filter__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  margin-left: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  color: #ffffff;
+  background: #4f46e5;
+  border-radius: 999px;
+}
+.gantt-filter__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: 280px;
+  max-height: 440px;
+  overflow-y: auto;
+  padding: 6px;
+  background: #ffffff;
+  border: 1px solid rgb(var(--border));
+  border-radius: 10px;
+  box-shadow:
+    0 12px 28px -12px rgba(15, 23, 42, 0.18),
+    0 4px 10px -6px rgba(15, 23, 42, 0.12);
+  font-size: 12.5px;
+  color: #0f172a;
+}
+.gantt-filter__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+.gantt-filter__clear {
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+  color: #4f46e5;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.gantt-filter__clear:hover {
+  background: rgba(79, 70, 229, 0.08);
+}
+.gantt-filter__section {
+  padding: 4px 4px 8px;
+  border-top: 1px solid rgb(var(--border) / 0.7);
+}
+.gantt-filter__section:first-of-type {
+  border-top: none;
+}
+.gantt-filter__section-title {
+  padding: 6px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.gantt-filter__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 6px 4px;
+}
+.gantt-filter__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: #0f172a;
+  background: #f1f5f9;
+  border: 1px solid rgb(var(--border));
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.gantt-filter__chip:hover {
+  background: #e2e8f0;
+}
+.gantt-filter__chip.is-off {
+  color: #94a3b8;
+  background: #ffffff;
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+.gantt-filter__chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+.gantt-filter__empty {
+  padding: 8px 10px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+.gantt-filter__tree {
+  padding: 2px 0;
+  display: flex;
+  flex-direction: column;
+}
+.gantt-filter__group + .gantt-filter__group {
+  margin-top: 2px;
+}
+.gantt-filter__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.gantt-filter__row:hover {
+  background: rgba(79, 70, 229, 0.06);
+}
+.gantt-filter__row input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  accent-color: #4f46e5;
+  cursor: pointer;
+}
+.gantt-filter__row.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.gantt-filter__row.is-disabled:hover {
+  background: transparent;
+}
+.gantt-filter__row.is-program .gantt-filter__row-label {
+  font-weight: 600;
+}
+.gantt-filter__row-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gantt-filter__children {
+  display: flex;
+  flex-direction: column;
+  padding-left: 18px;
+  border-left: 1px dashed rgb(var(--border));
+  margin: 2px 0 4px 10px;
+}
+
 .gantt-status {
   margin-left: auto;
   font-size: 11px;
@@ -361,7 +533,6 @@
   --wx-gantt-task-fill-color: #2563eb;
   --wx-gantt-summary-color: #dcfce7;
   --wx-gantt-summary-fill-color: #16a34a;
-  --wx-gantt-milestone-color: #fde68a;
   --wx-gantt-link-color: #6d28d9;
   --wx-gantt-link-color-hovered: #5b21b6;
   --wx-gantt-link-critical-color: #dc2626;
@@ -617,6 +788,188 @@
   background: #ef4444;
 }
 
+/* ---- Today line ----------------------------------------------------
+   A thin, non-interactive red rule painted at today's date inside the
+   Gantt chart area. Positioned with a pixel-per-ms ratio derived from
+   an existing bar, so it stays aligned across scroll / resize / zoom.
+   The tiny label at the top makes the meaning self-evident without
+   hover. */
+.today-overlay {
+  position: absolute;
+  width: 0;
+  z-index: 4;
+  pointer-events: none;
+  border-left: 2px solid rgba(239, 68, 68, 0.85);
+  box-shadow: 0 0 0 0.5px rgba(239, 68, 68, 0.15);
+}
+.today-overlay__tick {
+  position: absolute;
+  top: 0;
+  left: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #ef4444;
+  box-shadow: 0 0 0 2px #ffffff;
+}
+.today-overlay__label {
+  position: absolute;
+  top: 10px;
+  left: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: #ffffff;
+  background: #ef4444;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+/* ---- Critical-path focus ------------------------------------------
+   When the user clicks a bar of any level, we compute the predecessor
+   chain that most pushes its start date (+ that bar's ancestors so
+   the parent workstream/program rolls up with it) and light the whole
+   chain up in red. Everything off-path gets dimmed so the eye lands
+   on the path immediately.
+
+   The classes below are applied by the client directly onto the
+   `.task-pill` (carries data-bar-id) and the SVAR link `<polyline>`s
+   via a MutationObserver-backed effect, so they survive the
+   virtualization that the Gantt does on scroll. */
+.gantt-frame--crit-focus .task-pill.task-pill-wrap--crit-dim {
+  opacity: 0.28;
+  filter: saturate(0.4);
+  transition:
+    opacity 160ms ease,
+    filter 160ms ease;
+}
+.gantt-frame--crit-focus .task-pill.task-pill-wrap--crit {
+  transition:
+    box-shadow 160ms ease,
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+  box-shadow:
+    0 0 0 2px #ef4444,
+    0 6px 16px -8px rgba(239, 68, 68, 0.55);
+  background: linear-gradient(
+    180deg,
+    rgba(239, 68, 68, 0.96) 0%,
+    rgba(220, 38, 38, 0.96) 100%
+  ) !important;
+  border-color: rgba(185, 28, 28, 0.9) !important;
+  color: #ffffff !important;
+  z-index: 2;
+}
+.gantt-frame--crit-focus .task-pill.task-pill-wrap--crit .task-pill__fill {
+  background: rgba(255, 255, 255, 0.18) !important;
+}
+.gantt-frame--crit-focus
+  .task-pill.task-pill-wrap--crit
+  .task-pill__name,
+.gantt-frame--crit-focus
+  .task-pill.task-pill-wrap--crit
+  .task-pill__pct {
+  color: #ffffff !important;
+}
+
+/* Dependency links */
+.gantt-frame--crit-focus polyline.wx-line--crit-dim {
+  opacity: 0.18;
+  transition: opacity 160ms ease;
+}
+.gantt-frame--crit-focus polyline.wx-line--crit {
+  stroke: #ef4444 !important;
+  stroke-width: 2.5 !important;
+  opacity: 1 !important;
+  filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.45));
+}
+
+/* Hover-to-preview dependencies. On mouseover of a bar the client
+   adds `.gantt-frame--dep-hover` to the frame, `--dep-hover-root` to
+   the hovered bar, `--dep-hover` to each directly-linked bar, and
+   `--dep-hover` to each connecting SVG link. This is always-on so
+   users can glance around the chart and see what blocks what without
+   having to click into the critical-path mode. */
+.gantt-frame--dep-hover .task-pill {
+  transition:
+    box-shadow 120ms ease,
+    border-color 120ms ease,
+    filter 120ms ease,
+    opacity 120ms ease;
+}
+.gantt-frame--dep-hover .task-pill.task-pill-wrap--dep-hover-root {
+  box-shadow:
+    0 0 0 2px rgba(79, 70, 229, 0.9),
+    0 8px 18px -10px rgba(79, 70, 229, 0.55);
+  z-index: 3;
+}
+.gantt-frame--dep-hover .task-pill.task-pill-wrap--dep-hover {
+  box-shadow:
+    0 0 0 1.5px rgba(99, 102, 241, 0.75),
+    0 4px 12px -8px rgba(99, 102, 241, 0.45);
+  z-index: 2;
+}
+.gantt-frame--dep-hover polyline.wx-line {
+  transition:
+    stroke 120ms ease,
+    stroke-width 120ms ease,
+    opacity 120ms ease;
+  opacity: 0.22;
+}
+.gantt-frame--dep-hover polyline.wx-line--dep-hover {
+  stroke: #4f46e5 !important;
+  stroke-width: 2.25 !important;
+  opacity: 1 !important;
+  filter: drop-shadow(0 0 3px rgba(79, 70, 229, 0.45));
+}
+/* When the critical-path focus is engaged, the red path wins — keep
+   hover styles from bleeding through. */
+.gantt-frame--crit-focus.gantt-frame--dep-hover .task-pill.task-pill-wrap--dep-hover,
+.gantt-frame--crit-focus.gantt-frame--dep-hover .task-pill.task-pill-wrap--dep-hover-root {
+  box-shadow: none;
+}
+.gantt-frame--crit-focus.gantt-frame--dep-hover polyline.wx-line--dep-hover {
+  stroke: inherit !important;
+  stroke-width: inherit !important;
+  filter: none;
+}
+
+/* Clear-focus toolbar button */
+.gantt-crit-clear {
+  border-color: rgba(239, 68, 68, 0.5) !important;
+  color: #b91c1c !important;
+  background: rgba(254, 226, 226, 0.55) !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+}
+.gantt-crit-clear:hover {
+  background: rgba(254, 226, 226, 0.85) !important;
+  border-color: rgba(239, 68, 68, 0.75) !important;
+}
+.gantt-crit-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #ef4444;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.25);
+}
+.gantt-crit-target {
+  display: inline-block;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: #991b1b;
+  opacity: 0.8;
+}
+
 .task-issue-indicator {
   position: absolute;
   top: -5px;
@@ -785,6 +1138,65 @@
 
 .task-pill--parent .task-pill__fill {
   opacity: 0.18;
+}
+
+/* In-bar expand/collapse chevron. Lives at the far-left of the pill on
+   Programs/Workstreams so the user can roll a whole subtree open or
+   closed without leaving the chart. The pill itself has
+   `pointer-events: none` so SVAR can keep owning drag/resize/link-
+   create; the button explicitly re-enables pointer-events inline so
+   its click lands. Clicking only toggles the subtree — stopPropagation
+   prevents critical-path focus from triggering. */
+.task-pill__expand {
+  position: absolute;
+  top: 50%;
+  left: 4px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #334155;
+  cursor: pointer;
+  z-index: 3;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+.task-pill__expand:hover {
+  background: #ffffff;
+  border-color: rgb(var(--border));
+  box-shadow: 0 1px 4px -1px rgba(15, 23, 42, 0.25);
+  color: #0f172a;
+}
+/* Critical-path focus paints the bar red with white text — the chevron
+   should stay readable, so swap to a translucent white chip with a
+   white stroke in that mode. */
+.gantt-frame--crit-focus .task-pill.task-pill-wrap--crit .task-pill__expand {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.gantt-frame--crit-focus .task-pill.task-pill-wrap--crit .task-pill__expand:hover {
+  background: rgba(255, 255, 255, 0.32);
+}
+.task-pill__expand svg {
+  transition: transform 160ms ease;
+}
+.task-pill__expand.is-open svg {
+  transform: rotate(90deg);
+}
+/* Push the label inside the pill past the chevron so they never
+   overlap. Non-parent bars don't get this padding — their label can
+   start at the normal 7px padding. */
+.task-pill--parent .task-pill__text {
+  padding-left: 26px;
 }
 
 /* Unplaced: a task the user just created via "Create Task" but hasn't
@@ -1308,18 +1720,6 @@
 
 .task-context-item--danger .task-context-icon {
   color: #dc2626;
-}
-
-/* Milestone entry gets a red tint so it's obvious it's the action
-   that will drop a star on the chart. Icon keeps its fill from the
-   inline SVG props. */
-.task-context-item--milestone:hover,
-.task-context-item--milestone:focus-visible {
-  background: rgba(239, 68, 68, 0.14);
-}
-
-.task-context-item--milestone .task-context-icon {
-  color: #b91c1c;
 }
 
 .task-context-label {
@@ -2413,220 +2813,3 @@
   cursor: not-allowed;
 }
 
-/* ---------- Milestone (flashing star) bars ---------- */
-
-/* SVAR draws the bar inside .wx-bar. For milestones we disable the
-   default bar chrome and let our star template overflow the nominal
-   1px bar box so the star is visible on the chart. */
-.gantt-frame .wx-bar.wx-milestone,
-.gantt-frame .wx-bar:has(.milestone-star) {
-  background: transparent !important;
-  border: 0 !important;
-  box-shadow: none !important;
-  overflow: visible !important;
-}
-
-/* Outer container fills the nominal SVAR milestone bar (which is
-   anchored exactly at the milestone's date tick). It does NOT center
-   its children — the core and label each position themselves
-   absolutely so the label can never drag the star off the date. */
-.milestone-star {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 4;
-  white-space: nowrap;
-}
-
-/* The star glyph + its glow. Absolutely centered on the bar's left
-   edge — SVAR positions the milestone bar so its LEFT coincides with
-   the milestone date, so `left: 0` puts us right on it (translate -50%
-   then shifts the glyph center onto that tick). */
-.milestone-star__core {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 34px;
-  height: 34px;
-  display: inline-block;
-  pointer-events: auto;
-  cursor: pointer;
-}
-
-.milestone-star__svg {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  filter: drop-shadow(0 2px 4px rgba(190, 18, 60, 0.55));
-  transform-origin: center;
-  animation: milestone-pulse 1.6s ease-in-out infinite;
-}
-
-.milestone-star__glow {
-  position: absolute;
-  inset: -10px;
-  border-radius: 50%;
-  background: radial-gradient(
-    closest-side,
-    rgba(239, 68, 68, 0.7),
-    rgba(239, 68, 68, 0)
-  );
-  animation: milestone-glow 1.6s ease-in-out infinite;
-  pointer-events: none;
-}
-
-/* Default milestone = bright red. "Done" switches to green so completed
-   milestones read differently; "overdue" goes dark red with a faster
-   pulse to flag slip. */
-.milestone-star__glyph {
-  fill: #ef4444;
-  stroke: #7f1d1d;
-  stroke-width: 0.75;
-  stroke-linejoin: round;
-  stroke-linecap: round;
-}
-
-.milestone-star--done .milestone-star__glyph {
-  fill: #22c55e;
-  stroke: #166534;
-}
-
-.milestone-star--done .milestone-star__glow {
-  background: radial-gradient(
-    closest-side,
-    rgba(34, 197, 94, 0.5),
-    rgba(34, 197, 94, 0)
-  );
-}
-
-.milestone-star--overdue .milestone-star__glyph {
-  fill: #b91c1c;
-  stroke: #450a0a;
-}
-
-.milestone-star--overdue .milestone-star__glow {
-  background: radial-gradient(
-    closest-side,
-    rgba(185, 28, 28, 0.7),
-    rgba(185, 28, 28, 0)
-  );
-  animation-duration: 0.9s;
-}
-
-.milestone-star--overdue .milestone-star__svg {
-  animation-duration: 0.9s;
-}
-
-.milestone-star__label {
-  position: absolute;
-  /* Sit to the right of the star core (half of 34px + gap). Vertically
-     centered on the star's midline so the label always reads as a
-     nameplate for THIS star, not a floating pill. */
-  top: 50%;
-  left: calc(50% + 24px);
-  transform: translateY(-50%);
-  font:
-    700 12px/1.2 "Inter",
-    ui-sans-serif,
-    system-ui,
-    sans-serif;
-  color: #7f1d1d;
-  letter-spacing: 0.01em;
-  background: linear-gradient(180deg, #fff1f2 0%, #fee2e2 100%);
-  padding: 3px 9px;
-  border-radius: 999px;
-  border: 1px solid rgba(220, 38, 38, 0.55);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.06),
-    0 0 0 2px rgba(239, 68, 68, 0.18);
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  pointer-events: auto;
-}
-
-.milestone-star--done .milestone-star__label {
-  color: #14532d;
-  background: linear-gradient(180deg, #f0fdf4 0%, #dcfce7 100%);
-  border-color: rgba(22, 163, 74, 0.5);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.06),
-    0 0 0 2px rgba(34, 197, 94, 0.18);
-}
-
-.milestone-star--overdue .milestone-star__label {
-  color: #7f1d1d;
-  background: linear-gradient(180deg, #fef2f2 0%, #fecaca 100%);
-  border-color: rgba(185, 28, 28, 0.6);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.08),
-    0 0 0 2px rgba(185, 28, 28, 0.22);
-}
-
-@keyframes milestone-pulse {
-  0%,
-  100% {
-    transform: scale(1);
-    filter: drop-shadow(0 1px 2px rgba(190, 18, 60, 0.4));
-  }
-  50% {
-    transform: scale(1.18);
-    filter: drop-shadow(0 2px 10px rgba(239, 68, 68, 0.7));
-  }
-}
-
-@keyframes milestone-glow {
-  0%,
-  100% {
-    opacity: 0.35;
-    transform: translate(-50%, -50%) scale(0.9);
-  }
-  50% {
-    opacity: 0.95;
-    transform: translate(-50%, -50%) scale(1.3);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .milestone-star__svg,
-  .milestone-star__glow {
-    animation: none;
-  }
-}
-
-/* Floating overlay host for attached milestones. Sits on top of the
-   SVAR frame and lets underlying clicks through EXCEPT on the marker
-   itself, which is the click target for rename / delete. */
-.milestone-overlay {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 6; /* above hierarchy-overlay (5) and SVAR bars */
-}
-
-/* One marker per attached milestone. The marker box is the star's
-   bounding box; we translate by -50%/-50% so (left, top) resolves to
-   the star's visual center instead of its upper-left. The label is
-   absolutely positioned INSIDE the marker (see .milestone-star__label)
-   so it floats to the right of the star without shifting the anchor.
-
-   We explicitly override the .milestone-star base rules (inset: 0,
-   pointer-events: none) because the overlay marker needs its own
-   left/top anchor and needs to receive clicks for rename/delete. */
-.milestone-overlay__marker.milestone-star {
-  position: absolute;
-  inset: auto;
-  width: 34px;
-  height: 34px;
-  transform: translate(-50%, -50%);
-  pointer-events: auto;
-  cursor: pointer;
-}
-
-.milestone-overlay__marker:hover .milestone-star__label {
-  transform: translateY(-50%) scale(1.03);
-  box-shadow:
-    0 2px 6px rgba(239, 68, 68, 0.18),
-    0 0 0 2px rgba(239, 68, 68, 0.3);
-}

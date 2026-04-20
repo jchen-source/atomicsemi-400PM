@@ -23,23 +23,15 @@ export default async function GanttPage() {
   ]);
 
   const hasNotion = notionCount > 0;
-  const tasks = orderTasksHierarchy(rawTasks);
-  // Attached milestones live on their parent's row (rendered via
-  // MilestoneOverlay), so they're removed from the SVAR `tasks` feed.
-  // Any dependency whose source or target is one of those ids would
-  // dangle in SVAR — build a deny-set to filter them out below.
-  const attachedMilestoneIds = new Set(
-    tasks
-      .filter((t) => t.type === "MILESTONE" && t.parentId)
-      .map((t) => t.id),
+  // Legacy rows from the now-removed milestone feature are filtered
+  // out here so they disappear from the UI without requiring a DB
+  // migration — any `type === "MILESTONE"` rows are simply ignored.
+  const tasks = orderTasksHierarchy(rawTasks).filter(
+    (t) => t.type !== "MILESTONE",
   );
   const childCountByParent = new Map<string, number>();
   for (const t of tasks) {
     if (t.type === "ISSUE") continue;
-    // Attached milestones are not real rows in the chart (they overlay
-    // the parent), so they shouldn't inflate the parent's "has
-    // children" count and turn a solo parent into a summary row.
-    if (t.type === "MILESTONE" && t.parentId) continue;
     if (!t.parentId) continue;
     childCountByParent.set(
       t.parentId,
@@ -55,8 +47,8 @@ export default async function GanttPage() {
   }
   const linkedOpenIssuesByTask = new Map<string, string[]>();
   // Tri-state per-task indicator derived from linked issues:
-  //   - "slipping"  = at least one active issue has scheduleImpact flagged as
-  //     Task Slip or Milestone Slip (stored as `impact:...` in tags)
+  //   - "slipping"  = at least one active issue is flagged with a
+  //     schedule-impact tag (stored as `impact:...` on the issue)
   //   - "active"    = has active issues but none flagged as slipping
   //   - "resolved"  = no active issues but at least one was resolved in the
   //     last 3 days; fades out client-side via CSS
@@ -87,9 +79,9 @@ export default async function GanttPage() {
           const low = tag.toLowerCase();
           return (
             low === "impact:task slip" ||
-            low === "impact:milestone slip" ||
             low.replace(/\s+/g, "") === "impact:taskslip" ||
-            low.replace(/\s+/g, "") === "impact:milestoneslip"
+            low === "impact:workstream slip" ||
+            low.replace(/\s+/g, "") === "impact:workstreamslip"
           );
         });
       });
@@ -110,7 +102,6 @@ export default async function GanttPage() {
   const childrenByParent = new Map<string | null, string[]>();
   for (const t of tasks) {
     if (t.type === "ISSUE") continue;
-    if (t.type === "MILESTONE" && t.parentId) continue;
     const arr = childrenByParent.get(t.parentId) ?? [];
     arr.push(t.id);
     childrenByParent.set(t.parentId, arr);
@@ -217,18 +208,11 @@ export default async function GanttPage() {
       <GanttClient
         // Open Issues are managed on their own page and intentionally do
         // NOT render on the roadmap / Gantt surface — the Gantt is for
-        // planned work (programs, workstreams, tasks, milestones). Issue
-        // counts still surface on their anchor task's name as "[N open]".
-        //
-        // Attached milestones (those with a parent) are ALSO pulled out
-        // of the main task list — they render as overlay stars anchored
-        // to the parent's bar via the `milestones` prop below, so they
-        // share a row with their parent workstream/task instead of
-        // occupying their own line. Standalone milestones (no parent)
-        // still appear as their own row so they remain visible.
+        // planned work (programs, workstreams, tasks, subtasks). Issue
+        // counts still surface on their anchor task via the badge
+        // rendered inside the bar.
         tasks={tasks
           .filter((t) => t.type !== "ISSUE")
-          .filter((t) => !(t.type === "MILESTONE" && t.parentId))
           .map((t) => ({
             id: t.id,
             text: t.title,
@@ -246,36 +230,20 @@ export default async function GanttPage() {
             parent: t.parentId,
             open: (childCountByParent.get(t.id) ?? 0) > 0,
             type:
-              t.type === "MILESTONE"
-                ? "milestone"
-                : (childCountByParent.get(t.id) ?? 0) > 0 || t.type === "EPIC"
-                  ? "summary"
-                  : "task",
-            rowType: (t.type === "EPIC" || t.type === "MILESTONE"
-              ? t.type
-              : "TASK") as "EPIC" | "TASK" | "ISSUE" | "MILESTONE",
+              (childCountByParent.get(t.id) ?? 0) > 0 || t.type === "EPIC"
+                ? "summary"
+                : "task",
+            rowType: (t.type === "EPIC" ? "EPIC" : "TASK") as
+              | "EPIC"
+              | "TASK"
+              | "ISSUE",
           }))}
-        milestones={tasks
-          .filter((t) => t.type === "MILESTONE" && t.parentId)
-          .map((t) => ({
-            id: t.id,
-            title: t.title,
-            date: t.endDate.toISOString(),
-            parentId: t.parentId as string,
-            progress: t.progress,
-          }))}
-        links={deps
-          .filter(
-            (d) =>
-              !attachedMilestoneIds.has(d.predecessorId) &&
-              !attachedMilestoneIds.has(d.dependentId),
-          )
-          .map((d) => ({
-            id: d.id,
-            source: d.predecessorId,
-            target: d.dependentId,
-            type: depTypeToLinkType(d.type),
-          }))}
+        links={deps.map((d) => ({
+          id: d.id,
+          source: d.predecessorId,
+          target: d.dependentId,
+          type: depTypeToLinkType(d.type),
+        }))}
         issueIndicatorByTaskId={issueIndicatorByTaskId}
         openIssueCountByTaskId={openIssueCountByTaskId}
         emptyState={

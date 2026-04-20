@@ -22,7 +22,7 @@ export type ScheduleImpact =
   | "None"
   | "At Risk"
   | "Task Slip"
-  | "Milestone Slip";
+  | "Workstream Slip";
 
 export const ISSUE_TYPES: IssueType[] = [
   "Blocker",
@@ -37,7 +37,7 @@ export const SCHEDULE_IMPACTS: ScheduleImpact[] = [
   "None",
   "At Risk",
   "Task Slip",
-  "Milestone Slip",
+  "Workstream Slip",
 ];
 
 export const URGENCIES: IssueUrgency[] = ["low", "medium", "high", "critical"];
@@ -267,7 +267,8 @@ export function isActive(status: IssueStatus): boolean {
 
 export function isAffectingSchedule(v: ActiveIssueView): boolean {
   return (
-    v.scheduleImpact === "Task Slip" || v.scheduleImpact === "Milestone Slip"
+    v.scheduleImpact === "Task Slip" ||
+    v.scheduleImpact === "Workstream Slip"
   );
 }
 
@@ -281,7 +282,7 @@ const URGENCY_RANK: Record<IssueUrgency, number> = {
 };
 
 const IMPACT_RANK: Record<ScheduleImpact, number> = {
-  "Milestone Slip": 0,
+  "Workstream Slip": 0,
   "Task Slip": 0,
   "At Risk": 1,
   None: 2,
@@ -318,7 +319,7 @@ export type ReminderItem = {
   plannedEnd: string; // ISO
   percentComplete: number;
   parentWorkstream: string | null;
-  kind: "task" | "workstream" | "milestone";
+  kind: "task" | "workstream";
   /** true if this item has active open issues affecting schedule */
   atRisk: boolean;
 };
@@ -334,7 +335,7 @@ export type ReminderItem = {
  *     Useful for "what's landing on deck" conversation.
  *
  * Input rows should already be filtered to the planning set
- * (EPIC/TASK/MILESTONE, not ISSUE).
+ * (EPIC / TASK, not ISSUE).
  */
 export function buildReminderBuckets({
   tasks,
@@ -388,12 +389,7 @@ export function buildReminderBuckets({
     parentWorkstream: t.parentId
       ? parentTitleById.get(t.parentId) ?? null
       : null,
-    kind:
-      t.type === "MILESTONE"
-        ? "milestone"
-        : t.type === "EPIC"
-          ? "workstream"
-          : "task",
+    kind: t.type === "EPIC" ? "workstream" : "task",
     atRisk: affectedTaskIds.has(t.id),
   });
 

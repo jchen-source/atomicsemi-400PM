@@ -695,9 +695,15 @@ export default function GanttClient({
 
   // Explicit timeline range so SVAR renders the entire date scale up
   // front instead of lazily filling in ticks as the user scrolls — the
-  // old behavior looked like "dates take a while to populate". We pad
-  // by a couple of weeks on each side so bars aren't flush against the
-  // chart edge and there's room for the today-line / drag-extend.
+  // old behavior looked like "dates take a while to populate".
+  //
+  // Padding is asymmetric on purpose:
+  //   - Left: 2 weeks, just enough breathing room before the earliest
+  //     bar and the today-line.
+  //   - Right: 6 months, so users can always scroll into the future
+  //     to drop in planning tasks, even when no bar lives there yet.
+  //     (Previously we padded by only 2 weeks on both sides, which
+  //     made the timeline feel like it "ended" at the last bar.)
   const dateRange = useMemo<{ start: Date; end: Date } | null>(() => {
     if (!tasks.length) return null;
     let minMs = Infinity;
@@ -714,8 +720,13 @@ export default function GanttClient({
     const nowMs = Date.now();
     minMs = Math.min(minMs, nowMs);
     maxMs = Math.max(maxMs, nowMs);
-    const pad = 14 * 86_400_000;
-    return { start: new Date(minMs - pad), end: new Date(maxMs + pad) };
+    const dayMs = 86_400_000;
+    const leftPad = 14 * dayMs;
+    const rightPad = 183 * dayMs; // ~6 months of scrollable headroom
+    return {
+      start: new Date(minMs - leftPad),
+      end: new Date(maxMs + rightPad),
+    };
   }, [tasks]);
 
   useEffect(() => {
@@ -5935,25 +5946,36 @@ function ResourcePicker({
     searchRef.current?.focus();
   }, []);
 
-  // Dismiss on outside click, scroll, resize, or Escape.
+  // Dismiss on outside click, outside scroll, resize, or Escape.
+  // IMPORTANT: scrolls originating *inside* the picker (e.g. the
+  // option list's own overflow-y scroll when there are many
+  // contributors) must not close the menu — otherwise the user can
+  // never reach the bottom of the list because the first wheel
+  // event dismisses it. We gate the scroll handler on whether the
+  // event target is inside `menuRef`.
   useEffect(() => {
     const onDocMouseDown = (e: MouseEvent) => {
       const t = e.target as Node | null;
       if (t && menuRef.current && menuRef.current.contains(t)) return;
       onCancel();
     };
-    const onScroll = () => onCancel();
+    const onScrollOutside = (e: Event) => {
+      const t = e.target as Node | null;
+      if (t && menuRef.current && menuRef.current.contains(t)) return;
+      onCancel();
+    };
+    const onResize = () => onCancel();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCancel();
     };
     document.addEventListener("mousedown", onDocMouseDown);
-    window.addEventListener("scroll", onScroll, true);
-    window.addEventListener("resize", onScroll);
+    window.addEventListener("scroll", onScrollOutside, true);
+    window.addEventListener("resize", onResize);
     window.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("mousedown", onDocMouseDown);
-      window.removeEventListener("scroll", onScroll, true);
-      window.removeEventListener("resize", onScroll);
+      window.removeEventListener("scroll", onScrollOutside, true);
+      window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKey);
     };
   }, [onCancel]);

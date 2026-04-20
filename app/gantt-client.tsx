@@ -547,7 +547,13 @@ export default function GanttClient({
     const urgency = urgencyById.get(id) ?? data?.urgency ?? "medium";
     const pct = Math.max(0, Math.min(100, Number(data?.progress ?? 0)));
     const overdue = data?.end ? isOverdue(data.end, pct) : false;
-    const palette: Record<
+    const childCount = childCountByIdRef.current.get(id) ?? 0;
+    const isParentBar = childCount > 0;
+    // Tasks (leaves) show urgency to surface risk at a glance. Programs
+    // and workstreams (anything with children) switch to a muted
+    // slate/indigo "summary" palette so the hierarchy reads visually —
+    // parents look like groupings, not another individual task.
+    const taskPalette: Record<
       "high" | "medium" | "low",
       { bg: string; border: string; text: string; fill: string }
     > = {
@@ -570,7 +576,35 @@ export default function GanttClient({
         fill: "#16a34a",
       },
     };
-    const colors = palette[urgency];
+    // Level-aware parent palette. Program (level 0) reads deeper, workstream
+    // (level 1+) slightly lighter so they're distinguishable from each other
+    // and from leaf task bars at a glance.
+    const parentPalette: Record<
+      0 | 1 | 2,
+      { bg: string; border: string; text: string; fill: string }
+    > = {
+      0: {
+        bg: "#e0e7ff",
+        border: "#6366f1",
+        text: "#312e81",
+        fill: "#4f46e5",
+      },
+      1: {
+        bg: "#e2e8f0",
+        border: "#64748b",
+        text: "#1e293b",
+        fill: "#475569",
+      },
+      2: {
+        bg: "#dbeafe",
+        border: "#60a5fa",
+        text: "#1e3a8a",
+        fill: "#3b82f6",
+      },
+    };
+    const colors = isParentBar
+      ? parentPalette[Math.min(level, 2) as 0 | 1 | 2]
+      : taskPalette[urgency];
     const fullLabel = data?.text ?? "";
     const displayLabel = useMemo(
       () => formatTaskDisplayLabel(fullLabel),
@@ -632,8 +666,10 @@ export default function GanttClient({
       >
         <div
           ref={pillRef}
+          data-bar-id={id}
           className={
             `task-pill level-${level} urgency-${urgency}` +
+            (isParentBar ? " task-pill--parent" : " task-pill--leaf") +
             (overdue ? " task-pill--overdue" : "")
           }
           style={{
@@ -928,8 +964,8 @@ export default function GanttClient({
           align="center"
           toPayload={(s) => {
             if (!s) return null;
-            const d = new Date(s);
-            if (Number.isNaN(d.getTime())) return null;
+            const d = parseDateInputLocal(s);
+            if (!d) return null;
             return { startDate: d.toISOString() };
           }}
           display={
@@ -966,8 +1002,8 @@ export default function GanttClient({
           }
           toPayload={(s) => {
             if (!s) return null;
-            const d = new Date(s);
-            if (Number.isNaN(d.getTime())) return null;
+            const d = parseDateInputLocal(s);
+            if (!d) return null;
             return { endDate: d.toISOString() };
           }}
           display={
@@ -2571,6 +2607,9 @@ export default function GanttClient({
             />
           </Theme>
         )}
+        {tasks.length > 0 ? (
+          <HierarchyOverlay tasks={tasks} frameRef={frameRef} />
+        ) : null}
       </div>
       {depEditorTaskId && (
         <DepsPicker
@@ -3116,6 +3155,166 @@ function shortDate(d: Date) {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
+}
+
+/**
+ * Draws subtle L-shaped translucent lines from each parent bar down to
+ * every directly-nested child bar visible in the Gantt chart. Bars are
+ * located via `data-bar-id` attributes on each task pill, so the
+ * overlay follows scroll, zoom, expand/collapse, and drag-to-reschedule
+ * automatically without any coordination from the SVAR internals.
+ *
+ * The overlay lives *inside* the gantt-frame as an absolutely
+ * positioned SVG so it naturally inherits the frame's clipping — lines
+ * that would fall off the visible timeline are never painted. Pointer
+ * events are disabled so the overlay never steals clicks from bars.
+ */
+function HierarchyOverlay({
+  tasks,
+  frameRef,
+}: {
+  tasks: Array<{ id: string; parent: string | null }>;
+  frameRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  // A monotonically increasing tick we bump whenever the geometry of
+  // the bars could have changed. Used as the sole dep that forces a
+  // re-render so the useMemo below recomputes positions against fresh
+  // `getBoundingClientRect()` values.
+  const [tick, setTick] = useState(0);
+
+  useLayoutEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+
+    let raf = 0;
+    const schedule = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        setTick((t) => t + 1);
+      });
+    };
+
+    // Resize of the frame or any descendant (bars growing, columns
+    // resizing) invalidates cached positions.
+    const ro = new ResizeObserver(schedule);
+    ro.observe(frame);
+
+    // Bars move around whenever SVAR updates its DOM — drag, expand,
+    // zoom, task edits. Watching mutations is overkill but cheap given
+    // the request-animation-frame coalescing above.
+    const mo = new MutationObserver(schedule);
+    mo.observe(frame, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style", "class", "transform"],
+      childList: true,
+    });
+
+    // Horizontal/vertical scroll of the timeline body shifts bar
+    // positions relative to the frame. Capture so we see every
+    // scrollable inside SVAR's shadow containers.
+    const onScroll = () => schedule();
+    frame.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", schedule);
+
+    schedule();
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      mo.disconnect();
+      frame.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", schedule);
+    };
+  }, [frameRef]);
+
+  const childrenByParent = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const t of tasks) {
+      if (!t.parent) continue;
+      const arr = m.get(t.parent) ?? [];
+      arr.push(t.id);
+      m.set(t.parent, arr);
+    }
+    return m;
+  }, [tasks]);
+
+  // Recompute every render. useMemo on `tick` is sufficient — the dep
+  // array is intentionally shallow because we rely on DOM reads, not
+  // on React state to track bar positions.
+  const segments = useMemo(() => {
+    const frame = frameRef.current;
+    if (!frame) return { spines: [] as string[], stubs: [] as string[] };
+    const frameRect = frame.getBoundingClientRect();
+    const spines: string[] = [];
+    const stubs: string[] = [];
+    for (const [parentId, childIds] of childrenByParent) {
+      const parentEl = frame.querySelector(
+        `[data-bar-id="${CSS.escape(parentId)}"]`,
+      ) as HTMLElement | null;
+      if (!parentEl) continue;
+      const pRect = parentEl.getBoundingClientRect();
+      // Spine hugs the parent's left edge a few pixels in, visually
+      // reading as a "hangs off the parent" line rather than a border.
+      const spineX = pRect.left - frameRect.left + 8;
+      const spineTop = pRect.bottom - frameRect.top;
+      let spineBottom = spineTop;
+
+      for (const cid of childIds) {
+        const cEl = frame.querySelector(
+          `[data-bar-id="${CSS.escape(cid)}"]`,
+        ) as HTMLElement | null;
+        if (!cEl) continue;
+        const cRect = cEl.getBoundingClientRect();
+        const cy = cRect.top - frameRect.top + cRect.height / 2;
+        const cx = cRect.left - frameRect.left;
+        // Only draw the horizontal stub if the child bar starts to the
+        // right of the spine. If a child starts before its parent (can
+        // happen after drag rescheduling) we still extend the spine so
+        // the grouping visual doesn't vanish.
+        if (cx > spineX + 2) {
+          stubs.push(`M${spineX},${cy} L${cx},${cy}`);
+        }
+        if (cy > spineBottom) spineBottom = cy;
+      }
+
+      if (spineBottom > spineTop) {
+        spines.push(`M${spineX},${spineTop} L${spineX},${spineBottom}`);
+      }
+    }
+    return { spines, stubs };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, childrenByParent]);
+
+  if (segments.spines.length === 0 && segments.stubs.length === 0) {
+    return null;
+  }
+
+  return (
+    <svg className="hierarchy-overlay" aria-hidden>
+      {/* Single path per visual role keeps the SVG cheap even with
+          hundreds of bars — SVG compositing batches identical strokes. */}
+      <path className="hierarchy-overlay__spine" d={segments.spines.join(" ")} />
+      <path className="hierarchy-overlay__stub" d={segments.stubs.join(" ")} />
+    </svg>
+  );
+}
+
+// Parse a `YYYY-MM-DD` string from a native date input into a Date at
+// local noon. The default `new Date("YYYY-MM-DD")` parses as UTC
+// midnight, which in any negative UTC offset (e.g. PDT) resolves to the
+// *previous* calendar day once rendered through local getters — that's
+// why "selecting a date picks the day before it" showed up. Using local
+// noon keeps the round-trip stable on the picker's own machine and
+// survives a ±11h timezone shift by any viewer.
+function parseDateInputLocal(s: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const date = new Date(y, mo - 1, d, 12, 0, 0, 0);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function ParentPicker({

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { ensurePersonTable } from "@/lib/person-bootstrap";
 import { z } from "zod";
 
 type RouteCtx = { params: Promise<{ id: string }> };
@@ -11,6 +12,7 @@ const UpdatePersonSchema = z.object({
 });
 
 export async function PATCH(req: Request, ctx: RouteCtx) {
+  await ensurePersonTable();
   const { id } = await ctx.params;
   let body: unknown;
   try {
@@ -37,6 +39,7 @@ export async function PATCH(req: Request, ctx: RouteCtx) {
 }
 
 export async function DELETE(_req: Request, ctx: RouteCtx) {
+  await ensurePersonTable();
   const { id } = await ctx.params;
   try {
     await prisma.person.delete({ where: { id } });

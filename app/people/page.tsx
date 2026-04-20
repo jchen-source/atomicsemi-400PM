@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { DEFAULT_PEOPLE } from "../api/people/route";
+import { ensurePersonTable } from "@/lib/person-bootstrap";
 import { buildResourceMatrix } from "@/lib/resource-matrix";
 import PeopleClient from "./people-client";
 
@@ -8,6 +9,7 @@ export const dynamic = "force-dynamic";
 export default async function PeoplePage() {
   // Seed roster on first visit — mirrors the GET /api/people behavior so
   // the page doesn't render empty on a fresh deploy.
+  await ensurePersonTable();
   const count = await prisma.person.count();
   if (count === 0) {
     await prisma.person.createMany({

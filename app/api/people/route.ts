@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { ensurePersonTable } from "@/lib/person-bootstrap";
 import { z } from "zod";
 
 // Deduped starter roster captured from the project team list. Keeping this
@@ -27,6 +28,7 @@ export async function GET() {
   // else) asks for the roster we seed the defaults. This means a fresh
   // deploy surfaces the real team immediately without the user having to
   // run any extra setup step.
+  await ensurePersonTable();
   const count = await prisma.person.count();
   if (count === 0) {
     await prisma.person.createMany({

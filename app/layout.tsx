@@ -33,6 +33,7 @@ export default function RootLayout({
                 <SideLink href="/issues" label="Table View" />
                 <SideLink href="/open-issues" label="Open Issues" />
                 <SideLink href="/burndown" label="Burndown" />
+                <SideLink href="/people" label="People" />
                 <SideLink href="/settings" label="Settings" />
                 <SideLink href="/settings#notion" label="Notion Sync" />
               </nav>

@@ -14,3 +14,4 @@ build
 # prisma generated
 prisma/migrations/dev.db*
 prisma/dev.db*
+tsconfig.tsbuildinfo

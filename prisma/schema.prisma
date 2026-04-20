@@ -100,3 +100,19 @@ model Setting {
   value     String
   updatedAt DateTime @updatedAt
 }
+
+// Individual contributors available to assign to Tasks. Used as the roster
+// for the People page + resource matrix. Task assignments still live on
+// Task.assignee and Task.resourceAllocated as free-form strings so Notion
+// imports and ad-hoc names keep working; the matrix matches those strings
+// against Person.name (case-insensitive).
+model Person {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  role      String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([active])
+}

@@ -252,6 +252,20 @@ export default function GanttClient({
   }, [selectedIds]);
   const selectAnchorIdRef = useRef<string | null>(null);
 
+  // Task IDs that were just created but haven't been placed yet. Their
+  // bars render as faded "ghost" pills and clicking anywhere in the
+  // timeline on that row snaps the bar to the click's date. Client-only
+  // state — if the user refreshes before placing, the task simply keeps
+  // its default dates and can still be repositioned by dragging the
+  // bar like any other task.
+  const [needsPlacementIds, setNeedsPlacementIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const needsPlacementIdsRef = useRef(needsPlacementIds);
+  useEffect(() => {
+    needsPlacementIdsRef.current = needsPlacementIds;
+  }, [needsPlacementIds]);
+
   // Floating right-click menu anchored at the cursor. `scope` captures
   // the target row ids at open time so bulk actions keep working even if
   // the user shifts the selection while the menu is mounted.
@@ -549,6 +563,7 @@ export default function GanttClient({
     const overdue = data?.end ? isOverdue(data.end, pct) : false;
     const childCount = childCountByIdRef.current.get(id) ?? 0;
     const isParentBar = childCount > 0;
+    const needsPlacement = needsPlacementIds.has(id);
     // Tasks (leaves) show urgency to surface risk at a glance. Programs
     // and workstreams (anything with children) switch to a muted
     // slate/indigo "summary" palette so the hierarchy reads visually —
@@ -670,7 +685,8 @@ export default function GanttClient({
           className={
             `task-pill level-${level} urgency-${urgency}` +
             (isParentBar ? " task-pill--parent" : " task-pill--leaf") +
-            (overdue ? " task-pill--overdue" : "")
+            (overdue ? " task-pill--overdue" : "") +
+            (needsPlacement ? " task-pill--unplaced" : "")
           }
           style={{
             pointerEvents: "none",
@@ -1823,7 +1839,12 @@ export default function GanttClient({
     if (addingTask) return;
     setAddingTask(true);
     setStatus("Creating task…");
+    // The task needs real dates on the backend (schema enforces it), so we
+    // still seed a today → +7 placeholder window. That bar is immediately
+    // flagged as "unplaced" on the client; clicking anywhere in the timeline
+    // row snaps it to the click position.
     const start = new Date();
+    start.setHours(0, 0, 0, 0);
     const end = new Date(start.getTime() + 1000 * 60 * 60 * 24 * 7);
     try {
       const res = await fetch("/api/tasks", {
@@ -1842,10 +1863,18 @@ export default function GanttClient({
         }),
       });
       if (!res.ok) throw new Error(await res.text());
+      const created = (await res.json()) as { id?: string };
+      if (created?.id) {
+        setNeedsPlacementIds((prev) => {
+          const next = new Set(prev);
+          next.add(created.id!);
+          return next;
+        });
+      }
       markSaved();
-      setStatus("Task added. Drag it onto another task to nest it.");
+      setStatus("Click anywhere on the timeline to place your new task.");
       router.refresh();
-      setTimeout(() => setStatus(""), 1800);
+      setTimeout(() => setStatus(""), 4500);
     } catch (e: unknown) {
       setStatus(e instanceof Error ? e.message : "Create task failed");
     } finally {
@@ -2152,6 +2181,82 @@ export default function GanttClient({
           });
         }
         return;
+      }
+
+      // Click-to-place: if the user just created a task (or several) and
+      // hasn't placed them yet, a click anywhere in the timeline row for
+      // that task snaps the bar to the click's date. This is the "no
+      // typing dates" affordance — the new task is dropped where you
+      // click, with a 1-week default duration that the user can resize
+      // afterwards.
+      if (!onInlineInput && needsPlacementIdsRef.current.size > 0) {
+        // Scope: must be inside the chart pane, not the left table or
+        // scale header, and not on a real interactive element.
+        const chartPane = target?.closest('[class*="wx-chart"]');
+        const isLeftTable = !!target?.closest('[class*="wx-table"]');
+        const isScale = !!target?.closest('[class*="wx-scale"]');
+        const isOnControl =
+          !!target?.closest("button") ||
+          !!target?.closest("input") ||
+          !!target?.closest("[data-deps-cell-edit]") ||
+          !!target?.closest("[data-resource-picker]") ||
+          !!target?.closest("[data-task-drag-handle]");
+        if (chartPane && !isLeftTable && !isScale && !isOnControl) {
+          // Figure out which task row the click landed in by scanning
+          // the left-pane mirror rows (same vertical alignment).
+          const rowsEls =
+            root.querySelectorAll<HTMLElement>("[data-task-drag-id]");
+          let placeId: string | null = null;
+          for (const r of rowsEls) {
+            const rect = r.getBoundingClientRect();
+            if (ev.clientY >= rect.top && ev.clientY < rect.bottom) {
+              placeId = r.getAttribute("data-task-drag-id");
+              break;
+            }
+          }
+          if (placeId && needsPlacementIdsRef.current.has(placeId)) {
+            const task = tasks.find((t) => t.id === placeId);
+            if (task) {
+              // Derive the date-under-click from the task's own bar:
+              // we know the bar's pixel rect and its start/end dates,
+              // so linear interpolation gives us a clean ms-per-pixel.
+              const ownEl = root.querySelector<HTMLElement>(
+                `[data-bar-id="${CSS.escape(placeId)}"]`,
+              );
+              const startOwnMs = new Date(task.start).getTime();
+              const endOwnMs = new Date(task.end).getTime();
+              let clickMs = Date.now();
+              if (ownEl) {
+                const rect = ownEl.getBoundingClientRect();
+                const span = Math.max(1, endOwnMs - startOwnMs);
+                const pxPerMs = rect.width / span;
+                if (pxPerMs > 0 && Number.isFinite(pxPerMs)) {
+                  clickMs =
+                    startOwnMs + (ev.clientX - rect.left) / pxPerMs;
+                }
+              }
+              const duration = Math.max(1, endOwnMs - startOwnMs);
+              const start = new Date(clickMs);
+              start.setHours(0, 0, 0, 0);
+              const end = new Date(start.getTime() + duration);
+              ev.preventDefault();
+              ev.stopPropagation();
+              // Clear the flag optimistically so the pill de-fades
+              // immediately, before the server round-trip completes.
+              setNeedsPlacementIds((prev) => {
+                if (!prev.has(placeId!)) return prev;
+                const next = new Set(prev);
+                next.delete(placeId!);
+                return next;
+              });
+              void commitInlineEditRef.current(placeId, {
+                startDate: start.toISOString(),
+                endDate: end.toISOString(),
+              });
+              return;
+            }
+          }
+        }
       }
 
       // Click landed outside a task row (e.g. blank toolbar area). If it

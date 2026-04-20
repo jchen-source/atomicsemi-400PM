@@ -588,6 +588,32 @@
   opacity: 0.18;
 }
 
+/* Unplaced: a task the user just created via "Create Task" but hasn't
+   yet clicked anywhere on the timeline to position. Render it as a
+   faded, dashed ghost with a gentle pulse so it's obvious the bar is
+   waiting to be dropped somewhere. Clicking anywhere on the row's
+   timeline area places it there. */
+.task-pill--unplaced {
+  opacity: 0.55;
+  border-style: dashed !important;
+  border-width: 1.5px !important;
+  animation: task-pill-unplaced-pulse 1.8s ease-in-out infinite;
+}
+
+.task-pill--unplaced .task-pill__fill {
+  opacity: 0.1 !important;
+}
+
+@keyframes task-pill-unplaced-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 0.75;
+  }
+}
+
 /* Parent -> child connector overlay. Sits inside the gantt-frame as an
    absolutely positioned SVG. `pointer-events: none` ensures it never
    steals clicks from bars underneath. The paths themselves are drawn

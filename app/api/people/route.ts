@@ -1,22 +1,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { ensurePersonTable } from "@/lib/person-bootstrap";
+import { DEFAULT_PEOPLE } from "@/lib/default-people";
 import { z } from "zod";
-
-// Deduped starter roster captured from the project team list. Keeping this
-// constant in code (rather than a migration) means Render can redeploy onto
-// a fresh DB and still bootstrap the People sidebar + resource matrix with
-// a sensible default without overwriting anything a user has customized.
-export const DEFAULT_PEOPLE: string[] = [
-  "Kirit Joshi",
-  "William Christensen",
-  "Prajwal Tumkur Mahesh",
-  "Steven Szczeszynski",
-  "Logan Alexander",
-  "Rachael Ortega",
-  "Jasmine Milan",
-  "Jacky Chen",
-];
 
 const CreatePersonSchema = z.object({
   name: z.string().trim().min(1).max(80),

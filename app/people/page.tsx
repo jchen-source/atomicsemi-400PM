@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { DEFAULT_PEOPLE } from "../api/people/route";
+import { DEFAULT_PEOPLE } from "@/lib/default-people";
 import { ensurePersonTable } from "@/lib/person-bootstrap";
 import { buildResourceMatrix } from "@/lib/resource-matrix";
 import PeopleClient from "./people-client";

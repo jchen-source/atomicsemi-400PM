@@ -25,6 +25,37 @@ export default async function OpenIssuesPage() {
 
   const byId = new Map(linkTargets.map((t) => [t.id, t]));
   const issueIds = openIssues.map((i) => i.id);
+
+  // Downstream "blocking" relationships: any task/issue that has one of
+  // these open issues as a predecessor is being held up by it. We also
+  // count the issue's linked parent task as a blocker in the UI, since
+  // linking an ISSUE to a task usually implies "this is holding that up".
+  const outgoingDeps =
+    issueIds.length === 0
+      ? []
+      : await prisma.dependency.findMany({
+          where: { predecessorId: { in: issueIds } },
+          include: {
+            dependent: {
+              select: { id: true, title: true, type: true, status: true },
+            },
+          },
+        });
+  const blockingByIssueId = new Map<
+    string,
+    Array<{ id: string; title: string; type: string; status: string; kind: "dependency" | "linked" }>
+  >();
+  for (const d of outgoingDeps) {
+    const arr = blockingByIssueId.get(d.predecessorId) ?? [];
+    arr.push({
+      id: d.dependent.id,
+      title: d.dependent.title,
+      type: d.dependent.type,
+      status: d.dependent.status,
+      kind: "dependency",
+    });
+    blockingByIssueId.set(d.predecessorId, arr);
+  }
   const issueComments =
     issueIds.length === 0
       ? []
@@ -65,6 +96,24 @@ export default async function OpenIssuesPage() {
         progress: i.progress,
         urgency: urgencyFromTags(parseTags(i.tags)),
         tags: parseTags(i.tags),
+        blocking: [
+          // Dependency-based downstream items.
+          ...(blockingByIssueId.get(i.id) ?? []),
+          // Linked parent task is also surfaced as a "blocking" entry
+          // because an open issue against that task is, in effect,
+          // blocking it until resolved.
+          ...(i.parentId && byId.get(i.parentId)
+            ? [
+                {
+                  id: i.parentId,
+                  title: byId.get(i.parentId)!.title,
+                  type: byId.get(i.parentId)!.type,
+                  status: "TODO",
+                  kind: "linked" as const,
+                },
+              ]
+            : []),
+        ],
       }))}
       comments={issueComments.map((c) => ({
         id: c.id,

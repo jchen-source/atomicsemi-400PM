@@ -4,6 +4,13 @@ import { useMemo, useState } from "react";
 
 type Status = "TODO" | "IN_PROGRESS" | "BLOCKED" | "DONE";
 type Urgency = "high" | "medium" | "low";
+type BlockingTarget = {
+  id: string;
+  title: string;
+  type: string;
+  status: string;
+  kind: "dependency" | "linked";
+};
 type OpenIssue = {
   id: string;
   title: string;
@@ -18,6 +25,7 @@ type OpenIssue = {
   progress: number;
   urgency: Urgency;
   tags: string[];
+  blocking: BlockingTarget[];
 };
 type LinkTarget = {
   id: string;
@@ -60,6 +68,11 @@ export default function OpenIssuesClient({
     "ALL" | "TODO" | "IN_PROGRESS" | "BLOCKED"
   >("ALL");
   const [urgencyFilter, setUrgencyFilter] = useState<"ALL" | Urgency>("ALL");
+  const [ownerFilter, setOwnerFilter] = useState<string>("ALL");
+  const [linkedFilter, setLinkedFilter] = useState<string>("ALL");
+  type SlipBucket = "ALL" | "ON_TRACK" | "PULLED_IN" | "SLIPPING" | "CRITICAL";
+  const [slipFilter, setSlipFilter] = useState<SlipBucket>("ALL");
+  const [search, setSearch] = useState("");
   const [createTitle, setCreateTitle] = useState("");
   const [createOwner, setCreateOwner] = useState("");
   const [createExpectedDate, setCreateExpectedDate] = useState(
@@ -87,6 +100,7 @@ export default function OpenIssuesClient({
   }, [rows]);
 
   const filteredRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
     return rows
       .filter((r) =>
         tab === "resolved" ? r.status === "DONE" : r.status !== "DONE",
@@ -96,8 +110,63 @@ export default function OpenIssuesClient({
         if (statusFilter === "ALL") return true;
         return r.status === statusFilter;
       })
-      .filter((r) => urgencyFilter === "ALL" || r.urgency === urgencyFilter);
-  }, [rows, tab, statusFilter, urgencyFilter]);
+      .filter((r) => urgencyFilter === "ALL" || r.urgency === urgencyFilter)
+      .filter((r) => ownerFilter === "ALL" || (r.assignee ?? "") === ownerFilter)
+      .filter(
+        (r) =>
+          linkedFilter === "ALL" ||
+          (linkedFilter === "__unlinked__"
+            ? !r.linkedTaskId
+            : r.linkedTaskId === linkedFilter),
+      )
+      .filter((r) => {
+        if (slipFilter === "ALL") return true;
+        const b = slipBucket(r.originalResolutionDate, r.expectedResolutionDate);
+        return b === slipFilter;
+      })
+      .filter((r) => {
+        if (!q) return true;
+        return (
+          r.title.toLowerCase().includes(q) ||
+          (r.assignee ?? "").toLowerCase().includes(q) ||
+          (r.linkedTaskTitle ?? "").toLowerCase().includes(q)
+        );
+      });
+  }, [
+    rows,
+    tab,
+    statusFilter,
+    urgencyFilter,
+    ownerFilter,
+    linkedFilter,
+    slipFilter,
+    search,
+  ]);
+
+  const ownerOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) {
+      if (r.assignee) set.add(r.assignee);
+    }
+    return [...set].sort();
+  }, [rows]);
+
+  const activeFilterCount =
+    (statusFilter !== "ALL" ? 1 : 0) +
+    (urgencyFilter !== "ALL" ? 1 : 0) +
+    (ownerFilter !== "ALL" ? 1 : 0) +
+    (linkedFilter !== "ALL" ? 1 : 0) +
+    (slipFilter !== "ALL" ? 1 : 0) +
+    (search.trim() ? 1 : 0);
+
+  function clearFilters() {
+    setStatusFilter("ALL");
+    setUrgencyFilter("ALL");
+    setOwnerFilter("ALL");
+    setLinkedFilter("ALL");
+    setSlipFilter("ALL");
+    setSearch("");
+  }
   const commentsByIssueId = useMemo(() => {
     const map = new Map<string, OpenIssueComment[]>();
     for (const c of commentRows) {
@@ -164,6 +233,7 @@ export default function OpenIssuesClient({
           progress: created.progress,
           urgency: createUrgency,
           tags: created.tags ?? [`urgency:${createUrgency}`],
+          blocking: [],
         },
         ...prev,
       ]);
@@ -322,38 +392,98 @@ export default function OpenIssuesClient({
       </div>
 
       {tab === "open" && (
-        <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-white/60 px-3 py-2">
-          <span className="text-xs uppercase tracking-wide text-slate-500">
-            Filter
-          </span>
-          <select
-            className="rounded-md border border-border bg-background px-2 py-1 text-xs"
-            value={statusFilter}
-            onChange={(e) =>
-              setStatusFilter(
-                e.target.value as "ALL" | "TODO" | "IN_PROGRESS" | "BLOCKED",
-              )
-            }
-          >
-            <option value="ALL">All active ({counts.open})</option>
-            <option value="TODO">Open ({counts.todo})</option>
-            <option value="IN_PROGRESS">In Progress ({counts.inProgress})</option>
-            <option value="BLOCKED">Blocked ({counts.blocked})</option>
-          </select>
-          <select
-            className="rounded-md border border-border bg-background px-2 py-1 text-xs"
-            value={urgencyFilter}
-            onChange={(e) => setUrgencyFilter(e.target.value as "ALL" | Urgency)}
-          >
-            <option value="ALL">All urgencies</option>
-            <option value="high">High urgency</option>
-            <option value="medium">Medium urgency</option>
-            <option value="low">Low urgency</option>
-          </select>
-          <span className="ml-auto text-xs text-slate-500">
+        <div className="rounded-md border border-border bg-white/60 px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              Filter
+            </span>
+            <input
+              type="search"
+              placeholder="Search title, owner, linked task…"
+              className="flex-1 min-w-[180px] rounded-md border border-border bg-background px-2 py-1 text-xs"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            <select
+              className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+              value={statusFilter}
+              onChange={(e) =>
+                setStatusFilter(
+                  e.target.value as "ALL" | "TODO" | "IN_PROGRESS" | "BLOCKED",
+                )
+              }
+            >
+              <option value="ALL">All active ({counts.open})</option>
+              <option value="TODO">Open ({counts.todo})</option>
+              <option value="IN_PROGRESS">In Progress ({counts.inProgress})</option>
+              <option value="BLOCKED">Blocked ({counts.blocked})</option>
+            </select>
+            <select
+              className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+              value={urgencyFilter}
+              onChange={(e) => setUrgencyFilter(e.target.value as "ALL" | Urgency)}
+            >
+              <option value="ALL">All urgencies</option>
+              <option value="high">High urgency</option>
+              <option value="medium">Medium urgency</option>
+              <option value="low">Low urgency</option>
+            </select>
+            <select
+              className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+              value={slipFilter}
+              onChange={(e) => setSlipFilter(e.target.value as SlipBucket)}
+              title="Slippage vs. Original Resolution"
+            >
+              <option value="ALL">Any slip</option>
+              <option value="ON_TRACK">On track</option>
+              <option value="PULLED_IN">Pulled in</option>
+              <option value="SLIPPING">Slipping ≤ 7d</option>
+              <option value="CRITICAL">Critical &gt; 7d</option>
+            </select>
+            <select
+              className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+              value={ownerFilter}
+              onChange={(e) => setOwnerFilter(e.target.value)}
+            >
+              <option value="ALL">All owners</option>
+              {ownerOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+              {ownerOptions.length === 0 && (
+                <option value="" disabled>
+                  No owners yet
+                </option>
+              )}
+            </select>
+            <select
+              className="max-w-[220px] rounded-md border border-border bg-background px-2 py-1 text-xs"
+              value={linkedFilter}
+              onChange={(e) => setLinkedFilter(e.target.value)}
+            >
+              <option value="ALL">Any linked task</option>
+              <option value="__unlinked__">Unlinked only</option>
+              {linkTargets.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.type} · {t.title}
+                </option>
+              ))}
+            </select>
+            {activeFilterCount > 0 && (
+              <button
+                type="button"
+                className="rounded-md border border-border bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                onClick={clearFilters}
+              >
+                Clear ({activeFilterCount})
+              </button>
+            )}
+          </div>
+          <div className="mt-1.5 text-xs text-slate-500">
             Showing {filteredRows.length} of {counts.open} open issue
             {counts.open === 1 ? "" : "s"}
-          </span>
+          </div>
         </div>
       )}
 
@@ -447,7 +577,7 @@ export default function OpenIssuesClient({
                   </div>
                 )}
               </div>
-              <SlipCell
+              <SlipBadge
                 original={r.originalResolutionDate}
                 current={r.expectedResolutionDate}
               />
@@ -589,6 +719,45 @@ export default function OpenIssuesClient({
                     ))}
                 </select>
               </Field>
+              {r.blocking.length > 0 && (
+                <Field label={`Blocking (${r.blocking.length})`} wide>
+                  <div className="flex flex-wrap gap-1.5">
+                    {r.blocking.map((b) => (
+                      <span
+                        key={`${b.kind}-${b.id}`}
+                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] ${
+                          b.kind === "linked"
+                            ? "border-indigo-200 bg-indigo-50 text-indigo-700"
+                            : "border-rose-200 bg-rose-50 text-rose-700"
+                        }`}
+                        title={
+                          b.kind === "linked"
+                            ? "This issue is linked to (and holding up) this task."
+                            : "This issue is a predecessor of (blocking) this task."
+                        }
+                      >
+                        <svg
+                          width="10"
+                          height="10"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2.5"
+                        >
+                          <rect x="3" y="11" width="18" height="10" rx="2" />
+                          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                        </svg>
+                        <span className="truncate max-w-[220px]">
+                          {b.title}
+                        </span>
+                        <span className="rounded bg-white/70 px-1 text-[9px] font-semibold uppercase tracking-wide">
+                          {b.kind === "linked" ? "linked" : "dep"}
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                </Field>
+              )}
             </div>
 
             {/* Comments section */}
@@ -687,39 +856,129 @@ function statusBadgeClass(status: Status): string {
   return "text-slate-700";
 }
 
-function SlipCell({ original, current }: { original: string; current: string }) {
+function slipDeltaDays(original: string, current: string): number {
   const msPerDay = 86_400_000;
-  const o = new Date(original);
-  const c = new Date(current);
-  const delta = Math.round((c.getTime() - o.getTime()) / msPerDay);
+  return Math.round(
+    (new Date(current).getTime() - new Date(original).getTime()) / msPerDay,
+  );
+}
+
+function slipBucket(
+  original: string,
+  current: string,
+): "ON_TRACK" | "PULLED_IN" | "SLIPPING" | "CRITICAL" {
+  const d = slipDeltaDays(original, current);
+  if (d === 0) return "ON_TRACK";
+  if (d < 0) return "PULLED_IN";
+  if (d <= 7) return "SLIPPING";
+  return "CRITICAL";
+}
+
+function SlipBadge({
+  original,
+  current,
+}: {
+  original: string;
+  current: string;
+}) {
+  const delta = slipDeltaDays(original, current);
+  const abs = Math.abs(delta);
+
   if (delta === 0) {
     return (
-      <span className="rounded bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-        On track
-      </span>
-    );
-  }
-  if (delta > 0) {
-    return (
-      <span
-        className={`rounded px-2 py-0.5 text-[11px] font-medium ${
-          delta > 7
-            ? "bg-red-100 text-red-700"
-            : "bg-amber-100 text-amber-700"
-        }`}
-        title={`Slipped ${delta} day${delta === 1 ? "" : "s"} from original target.`}
+      <div
+        className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5"
+        title="On original target"
       >
-        +{delta}d
-      </span>
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          className="text-emerald-600"
+        >
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+        <div className="flex flex-col leading-none">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-700">
+            On track
+          </span>
+          <span className="text-[10px] text-emerald-600">0 days</span>
+        </div>
+      </div>
     );
   }
+
+  if (delta < 0) {
+    return (
+      <div
+        className="flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-1.5"
+        title={`Pulled in ${abs} day${abs === 1 ? "" : "s"}`}
+      >
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          className="text-sky-600"
+        >
+          <polyline points="7 17 12 12 17 17" />
+          <polyline points="7 11 12 6 17 11" />
+        </svg>
+        <div className="flex flex-col leading-none">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-sky-700">
+            Pulled in
+          </span>
+          <span className="text-sm font-bold text-sky-700">{delta}d</span>
+        </div>
+      </div>
+    );
+  }
+
+  const critical = delta > 7;
+  const cls = critical
+    ? "border-red-300 bg-red-50"
+    : "border-amber-300 bg-amber-50";
+  const tone = critical ? "text-red-700" : "text-amber-700";
+  const softer = critical ? "text-red-600" : "text-amber-600";
+
   return (
-    <span
-      className="rounded bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-700"
-      title={`Pulled in ${Math.abs(delta)} day${delta === -1 ? "" : "s"}.`}
+    <div
+      className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 ${cls} ${critical ? "shadow-sm ring-2 ring-red-200" : ""}`}
+      title={
+        critical
+          ? `Critical slip — ${delta} days past the original target.`
+          : `Slipped ${delta} day${delta === 1 ? "" : "s"} from original target.`
+      }
     >
-      {delta}d
-    </span>
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        className={tone}
+      >
+        <path d="M12 8v5M12 17h.01" />
+        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      </svg>
+      <div className="flex flex-col leading-none">
+        <span className={`text-[10px] font-semibold uppercase tracking-wider ${tone}`}>
+          {critical ? "Critical" : "Slipping"}
+        </span>
+        <span className={`text-sm font-bold ${tone}`}>
+          +{delta}d
+        </span>
+        <span className={`text-[10px] ${softer}`}>
+          vs original
+        </span>
+      </div>
+    </div>
   );
 }
 

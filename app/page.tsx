@@ -113,46 +113,40 @@ export default async function GanttPage() {
       )}
 
       <GanttClient
-        tasks={tasks.map((t) => ({
-          id: t.id,
-          text:
-            t.type === "ISSUE"
-              ? `Open Issue: ${t.title}`
-              : linkedOpenIssuesByTask.get(t.id)?.length
-                ? `${t.title} [${linkedOpenIssuesByTask.get(t.id)!.length} open]`
-                : t.title,
-          start: t.startDate.toISOString(),
-          end: t.endDate.toISOString(),
-          depsLabel:
-            t.type === "ISSUE"
-              ? `Linked to: ${
-                  t.parentId ? (taskTitleById.get(t.parentId) ?? "Unknown") : "Unlinked"
-                }`
-              : linkedOpenIssuesByTask.get(t.id)?.length
-                ? `Open issues: ${linkedOpenIssuesByTask.get(t.id)!.join(", ")}`
-                : (incomingDepsByTask.get(t.id) ?? []).join(", ") || "—",
-          depsCount: (incomingDepsByTask.get(t.id) ?? []).length,
-          progress: t.progress,
-          urgency: urgencyFromTags(parseTags(t.tags)),
-          effortHours: t.effortHours ?? null,
-          assignee: t.assignee ?? null,
-          resourceAllocated: t.resourceAllocated ?? null,
-          parent: t.type === "ISSUE" ? null : t.parentId,
-          open: t.type === "ISSUE" ? undefined : (childCountByParent.get(t.id) ?? 0) > 0,
-          type:
-            t.type === "MILESTONE"
-              ? "milestone"
-              : t.type === "ISSUE"
-                ? "task"
+        // Open Issues are managed on their own page and intentionally do
+        // NOT render on the roadmap / Gantt surface — the Gantt is for
+        // planned work (programs, workstreams, tasks, milestones). Issue
+        // counts still surface on their anchor task's name as "[N open]".
+        tasks={tasks
+          .filter((t) => t.type !== "ISSUE")
+          .map((t) => ({
+            id: t.id,
+            text: linkedOpenIssuesByTask.get(t.id)?.length
+              ? `${t.title} [${linkedOpenIssuesByTask.get(t.id)!.length} open]`
+              : t.title,
+            start: t.startDate.toISOString(),
+            end: t.endDate.toISOString(),
+            depsLabel: linkedOpenIssuesByTask.get(t.id)?.length
+              ? `Open issues: ${linkedOpenIssuesByTask.get(t.id)!.join(", ")}`
+              : (incomingDepsByTask.get(t.id) ?? []).join(", ") || "—",
+            depsCount: (incomingDepsByTask.get(t.id) ?? []).length,
+            progress: t.progress,
+            urgency: urgencyFromTags(parseTags(t.tags)),
+            effortHours: t.effortHours ?? null,
+            assignee: t.assignee ?? null,
+            resourceAllocated: t.resourceAllocated ?? null,
+            parent: t.parentId,
+            open: (childCountByParent.get(t.id) ?? 0) > 0,
+            type:
+              t.type === "MILESTONE"
+                ? "milestone"
                 : (childCountByParent.get(t.id) ?? 0) > 0 || t.type === "EPIC"
                   ? "summary"
                   : "task",
-          rowType: (t.type === "EPIC" ||
-          t.type === "ISSUE" ||
-          t.type === "MILESTONE"
-            ? t.type
-            : "TASK") as "EPIC" | "TASK" | "ISSUE" | "MILESTONE",
-        }))}
+            rowType: (t.type === "EPIC" || t.type === "MILESTONE"
+              ? t.type
+              : "TASK") as "EPIC" | "TASK" | "ISSUE" | "MILESTONE",
+          }))}
         links={deps.map((d) => ({
           id: d.id,
           source: d.predecessorId,

@@ -229,7 +229,14 @@
 .gantt-frame .wx-header {
   /* Slimmer, more aesthetic column banner: soft neutral fill, thin divider,
      muted caption-style labels. Shares typography with the body cells so
-     the grid reads as one system. */
+     the grid reads as one system.
+
+     IMPORTANT: do NOT force a fixed height here. The timeline on the right
+     uses two scale rows (year + month/week), so the scale area is
+     2 * scaleHeight tall. If we clamp this header to one scaleHeight, the
+     left body starts that many pixels above the right body and the first
+     row ("New Task") gets visually sliced by its own header. Letting SVAR
+     size this box naturally keeps the two panes in lockstep. */
   background: linear-gradient(
     to bottom,
     #fbfcfe 0%,
@@ -245,9 +252,16 @@
   text-transform: none !important;
   font-variant-numeric: tabular-nums !important;
   padding: 0 8px !important;
-  height: 28px !important;
-  line-height: 28px !important;
   box-shadow: inset 0 -1px 0 rgba(15, 23, 42, 0.04);
+}
+
+/* When the left column-header row stretches to match the two-row scale
+   area on the right, center each label in the taller box so they don't
+   sit awkwardly at the top. */
+.gantt-frame .wx-header .wx-cell {
+  display: flex !important;
+  align-items: center !important;
+  line-height: 1.2 !important;
 }
 
 /* Thin vertical rules between column labels rather than SVAR's heavier

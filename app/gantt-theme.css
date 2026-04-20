@@ -227,17 +227,34 @@
 }
 
 .gantt-frame .wx-header {
-  background: #f8fafc !important;
-  border-color: rgb(var(--border)) !important;
+  /* Slimmer, more aesthetic column banner: soft neutral fill, thin divider,
+     muted caption-style labels. Shares typography with the body cells so
+     the grid reads as one system. */
+  background: linear-gradient(
+    to bottom,
+    #fbfcfe 0%,
+    #f4f6fa 100%
+  ) !important;
+  border-color: rgba(15, 23, 42, 0.06) !important;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08) !important;
   color: rgb(var(--muted-fg)) !important;
-  /* Match Task / Start / End / Depends-on body typography so headers and
-     cells share one font family. Sentence-case, tabular, no tracking. */
   font-family: inherit !important;
   font-weight: 500 !important;
-  font-size: 12px !important;
+  font-size: 11.5px !important;
   letter-spacing: 0 !important;
   text-transform: none !important;
   font-variant-numeric: tabular-nums !important;
+  padding: 0 8px !important;
+  height: 28px !important;
+  line-height: 28px !important;
+  box-shadow: inset 0 -1px 0 rgba(15, 23, 42, 0.04);
+}
+
+/* Thin vertical rules between column labels rather than SVAR's heavier
+   default borders. */
+.gantt-frame .wx-header + .wx-header,
+.gantt-frame .wx-header .wx-cell + .wx-cell {
+  border-left-color: rgba(15, 23, 42, 0.05) !important;
 }
 
 .gantt-frame .wx-bar {

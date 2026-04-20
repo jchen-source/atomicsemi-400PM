@@ -1455,7 +1455,7 @@ export default function GanttClient({
               zoom={false}
               columns={columns}
               cellHeight={56}
-              scaleHeight={36}
+              scaleHeight={28}
               cellWidth={zoom === "quarter" ? 80 : zoom === "month" ? 100 : 40}
               cellBorders="full"
               init={init}

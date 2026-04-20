@@ -2198,23 +2198,37 @@
   overflow: visible !important;
 }
 
+/* Outer container fills the nominal SVAR milestone bar (which is
+   anchored exactly at the milestone's date tick). It does NOT center
+   its children — the core and label each position themselves
+   absolutely so the label can never drag the star off the date. */
 .milestone-star {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+  white-space: nowrap;
+}
+
+/* The star glyph + its glow. Absolutely centered on the bar's left
+   edge — SVAR positions the milestone bar so its LEFT coincides with
+   the milestone date, so `left: 0` puts us right on it (translate -50%
+   then shifts the glyph center onto that tick). */
+.milestone-star__core {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  width: 28px;
+  height: 28px;
+  display: inline-block;
   pointer-events: auto;
   cursor: pointer;
-  padding: 0;
-  white-space: nowrap;
-  z-index: 4;
 }
 
 .milestone-star__svg {
-  position: relative;
+  position: absolute;
+  inset: 0;
   z-index: 1;
   filter: drop-shadow(0 1px 2px rgba(202, 138, 4, 0.35));
   transform-origin: center;
@@ -2223,11 +2237,7 @@
 
 .milestone-star__glow {
   position: absolute;
-  top: 50%;
-  left: 14px;
-  width: 28px;
-  height: 28px;
-  transform: translate(-50%, -50%);
+  inset: -6px;
   border-radius: 50%;
   background: radial-gradient(
     closest-side,
@@ -2278,6 +2288,12 @@
 }
 
 .milestone-star__label {
+  position: absolute;
+  /* Sit to the right of the star core (22px half-width + 6px gap
+     from the bar's center line). Vertically centered. */
+  top: 50%;
+  left: calc(50% + 22px);
+  transform: translateY(-50%);
   font:
     600 11px/1.15 "Inter",
     ui-sans-serif,
@@ -2293,6 +2309,7 @@
   max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
+  pointer-events: auto;
 }
 
 .milestone-star--done .milestone-star__label {

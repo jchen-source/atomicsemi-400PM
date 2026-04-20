@@ -2250,12 +2250,14 @@ export default function GanttClient({
         : "Adding milestone…",
     );
     try {
-      const anchor = parent ? new Date(parent.end) : new Date();
-      // Milestones are zero-duration: startDate === endDate. The backend
-      // rollup already excludes MILESTONE from the parent's span, so
-      // putting them on the parent's end date won't push the parent out.
-      const date = new Date(anchor);
-      date.setHours(12, 0, 0, 0);
+      // Milestones are zero-duration (startDate === endDate) and the
+      // backend rollup excludes MILESTONE from the parent's span, so
+      // putting one on the parent's exact endDate timestamp won't push
+      // the parent out. We deliberately DON'T call setHours() here —
+      // shifting to a fixed local hour can flip the calendar day in
+      // timezones where the parent's end lands near midnight UTC, which
+      // was offsetting the star by a day on the chart.
+      const date = parent ? new Date(parent.end) : new Date();
       const res = await fetch("/api/tasks", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -3841,40 +3843,43 @@ function MilestoneBar({
   overdue: boolean;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const stateClass =
+    (done ? " milestone-star--done" : " milestone-star--open") +
+    (overdue ? " milestone-star--overdue" : "");
   return (
     <div
       ref={ref}
       data-bar-id={id}
-      className={
-        "milestone-star" +
-        (done ? " milestone-star--done" : " milestone-star--open") +
-        (overdue ? " milestone-star--overdue" : "")
-      }
+      className={"milestone-star" + stateClass}
       title={label ? `Milestone: ${label}` : "Milestone"}
     >
-      <span className="milestone-star__glow" aria-hidden="true" />
-      <svg
-        viewBox="0 0 24 24"
-        width="28"
-        height="28"
-        aria-hidden="true"
-        focusable="false"
-        className="milestone-star__svg"
-      >
-        {/* Four-point sparkle: each arm is a sharp cusp with deep
-            concave curves between it and its neighbors, matching the
-            "sparkle" glyph reference rather than a classic 5-point
-            star. Control points (≈11.4 / 12.6 around center 12) give
-            the thin pinched-in waist. */}
-        <path
-          d="M12 1
-             Q12.55 11.45 23 12
-             Q12.55 12.55 12 23
-             Q11.45 12.55 1 12
-             Q11.45 11.45 12 1 Z"
-          className="milestone-star__glyph"
-        />
-      </svg>
+      {/* The star "core" is absolutely centered on the bar's X so it
+          sits exactly on the milestone's date tick. The label is a
+          separate absolutely-positioned element floated to the right
+          of the core so it never pushes the star off-axis. */}
+      <span className="milestone-star__core" aria-hidden="true">
+        <span className="milestone-star__glow" />
+        <svg
+          viewBox="0 0 24 24"
+          width="28"
+          height="28"
+          aria-hidden="true"
+          focusable="false"
+          className="milestone-star__svg"
+        >
+          {/* Four-point sparkle: each arm is a sharp cusp with deep
+              concave curves between it and its neighbors. Control
+              points near center (≈11.45 / 12.55) give the pinched waist. */}
+          <path
+            d="M12 1
+               Q12.55 11.45 23 12
+               Q12.55 12.55 12 23
+               Q11.45 12.55 1 12
+               Q11.45 11.45 12 1 Z"
+            className="milestone-star__glyph"
+          />
+        </svg>
+      </span>
       {label ? <span className="milestone-star__label">{label}</span> : null}
     </div>
   );

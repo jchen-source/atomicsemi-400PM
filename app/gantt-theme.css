@@ -8,27 +8,53 @@
 /* Inline single-click cell editors used by Start/End/% Complete/Hours
    and the task name. Display mode looks like plain text; click swaps it
    for an input without losing layout stability. */
+/* The editable span intentionally fills its entire grid cell, both
+   horizontally (flex:1 / width:100%) and vertically (min-height) so a
+   single click anywhere in the cell always enters edit mode. We also
+   disable text selection on the label; otherwise pressing down on a
+   character sometimes starts a browser text selection and the follow-up
+   click never registers, which made clicks on the text appear to do
+   nothing while clicks on the surrounding padding worked. */
+/* Display mode: flush with the grid cell — no nested “pill” (no inset
+   border, no rounded inner fill). SVAR already paints row/cell focus;
+   doubling that with purple chrome read as an unwanted second box. */
 .inline-edit-display {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   justify-content: inherit;
-  min-height: 22px;
-  padding: 2px 4px;
-  margin: -2px -4px;
-  border-radius: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 2px;
+  margin: 0;
+  border-radius: 0;
   cursor: text;
-  transition: background-color 0.1s ease, box-shadow 0.1s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  background: transparent;
+  box-shadow: none;
+  /* Display mode is click-to-activate (like a button), not a text field */
+  cursor: pointer;
 }
 
 .inline-edit-display:hover {
-  background-color: rgba(79, 70, 229, 0.06);
-  box-shadow: inset 0 0 0 1px rgba(79, 70, 229, 0.15);
+  background-color: transparent;
+  box-shadow: none;
 }
 
 .inline-edit-display:focus {
   outline: none;
-  background-color: rgba(79, 70, 229, 0.08);
-  box-shadow: inset 0 0 0 1.5px rgba(79, 70, 229, 0.4);
+  background-color: transparent;
+  box-shadow: none;
+}
+
+/* Keyboard users only: a light outer ring so Tab focus is visible
+   without looking like a second container inside the cell. */
+.inline-edit-display:focus-visible {
+  outline: 2px solid rgba(79, 70, 229, 0.35);
+  outline-offset: 1px;
+  border-radius: 2px;
 }
 
 .inline-edit-display--readonly {
@@ -40,45 +66,57 @@
   box-shadow: none;
 }
 
-.inline-edit-input {
-  box-sizing: border-box;
-  width: 100%;
-  height: 26px;
-  padding: 2px 6px;
-  margin: 0;
-  font: inherit;
-  font-size: 12px;
-  color: rgb(var(--foreground));
-  background: #ffffff;
-  border: 1.5px solid rgba(79, 70, 229, 0.55);
-  border-radius: 4px;
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
-  outline: none;
-}
-
-.inline-edit-input:focus {
-  border-color: rgba(79, 70, 229, 0.85);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
-}
-
+/* Unified inline-edit input. Used for Task name and the meta columns
+   (Start / End / Percent / Hours). Single clean blue hairline border,
+   rounded, no outer glow — matches the intended visual: one input, one
+   border, no nested chrome. */
+.inline-edit-input,
 .task-cell-text-input {
   box-sizing: border-box;
   width: 100%;
+  min-height: 30px;
+  padding: 4px 10px;
+  margin: 0;
   font: inherit;
   font-size: 13px;
   font-weight: inherit;
   color: rgb(var(--foreground));
   background: #ffffff;
-  border: 1.5px solid rgba(79, 70, 229, 0.55);
-  border-radius: 4px;
-  padding: 2px 6px;
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+  border: 1px solid rgb(59 130 246);
+  border-radius: 8px;
+  box-shadow: none;
   outline: none;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
+/* Meta cells (dates, numbers) are a touch smaller so they don't
+   overpower their narrow columns but stay visually consistent with
+   the task-name input. */
+.inline-edit-input {
+  min-height: 28px;
+  font-size: 12px;
+  padding: 3px 8px;
+}
+
+.inline-edit-input:focus,
 .task-cell-text-input:focus {
-  border-color: rgba(79, 70, 229, 0.85);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
+  border-color: rgb(37 99 235);
+  box-shadow: none;
+}
+
+/* Tidy up the browser's native number spinners and date picker so the
+   input reads as a simple rounded field. */
+.inline-edit-input[type="number"]::-webkit-inner-spin-button,
+.inline-edit-input[type="number"]::-webkit-outer-spin-button {
+  height: 22px;
+  opacity: 0.6;
+}
+
+.inline-edit-input[type="date"]::-webkit-calendar-picker-indicator {
+  padding: 0 2px;
+  opacity: 0.7;
+  cursor: pointer;
 }
 
 /* Single unified surface: controls sit on top of the frame with no gap */
@@ -289,6 +327,20 @@
   border-color: rgb(var(--border)) !important;
 }
 
+/* Any grid cell that wraps an editable control should feel like a
+   single clickable tile — pointer cursor everywhere in the cell, not
+   just over the inner text span. Without this the unused space in a
+   .wx-cell shows SVAR's default arrow/text cursor and clicks there
+   appeared to do nothing even though our frame handler forwards them
+   to the editable span. */
+.gantt-frame .wx-cell:has(
+    .inline-edit-display:not(.inline-edit-display--readonly)
+  ),
+.gantt-frame .wx-cell:has(.deps-cell-edit),
+.gantt-frame .wx-cell:has([data-resource-picker]) {
+  cursor: pointer;
+}
+
 .gantt-frame .wx-row:nth-child(even) {
   background: rgba(241, 245, 249, 0.45);
 }
@@ -396,31 +448,22 @@
   opacity: 1 !important;
 }
 
-/* Template root. Must NOT clip, otherwise the out-of-bar overflow label
-   would be cut at the edge of the bar itself. The inner .task-pill keeps
-   overflow:hidden for the progress fill + clipped text. */
+/* Template root. Keeps `.task-pill` cleanly sized to the bar; tooltips
+   live in a portal on <body> so they're never clipped by SVAR containers. */
 .task-pill-wrap {
   position: relative;
   width: 100%;
   height: 100%;
-  /* Give our absolutely-positioned overflow label a stacking context so
-     it floats above adjacent bars rather than hiding behind them. */
-  z-index: 1;
 }
 
-/* SVAR wraps taskTemplate in `.wx-bar .wx-content` with overflow:hidden
-   and text-overflow:ellipsis, which would clip the spill-over label.
-   Relax those two properties so the external label can escape the bar,
-   and also soften `.wx-bars` so labels aren't cropped at the timeline
-   edge when a bar sits near the right side of the chart. */
+/* SVAR wraps taskTemplate in `.wx-bar .wx-content` with overflow:hidden,
+   white-space:nowrap, and text-overflow:ellipsis. Relax those so our
+   single-line pill + % chip render together cleanly inside the bar
+   without double-ellipsis. */
 .gantt-frame .wx-bar .wx-content {
-  overflow: visible !important;
+  overflow: hidden !important;
   text-overflow: clip !important;
   white-space: normal !important;
-}
-
-.gantt-frame .wx-bars {
-  overflow: visible !important;
 }
 
 .task-pill {
@@ -432,45 +475,6 @@
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid transparent;
-}
-
-/* External label shown only when the name couldn't fit inside the bar.
-   Positioned just past the bar's right edge, vertically centered, and
-   given a subtle pill background so it reads cleanly against the grid. */
-.task-pill__overflow-label {
-  position: absolute;
-  left: calc(100% + 6px);
-  top: 50%;
-  transform: translateY(-50%);
-  white-space: nowrap;
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.01em;
-  padding: 2px 6px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
-  border: 1px solid rgba(15, 23, 42, 0.06);
-  pointer-events: none;
-  max-width: 360px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  z-index: 2;
-}
-
-.task-pill__overflow-label.urgency-high {
-  background: #fff5f5;
-  border-color: rgba(248, 113, 113, 0.4);
-}
-
-.task-pill__overflow-label.urgency-medium {
-  background: #fffbeb;
-  border-color: rgba(245, 158, 11, 0.35);
-}
-
-.task-pill__overflow-label.urgency-low {
-  background: #f0fdf4;
-  border-color: rgba(74, 222, 128, 0.4);
 }
 
 .task-pill::before {
@@ -527,15 +531,15 @@
 .task-pill__name {
   flex: 1 1 auto;
   min-width: 0;
-  /* Wrap the full task/issue name. Long words break so narrow bars still
-     show something meaningful instead of a single clipped glyph. */
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+  /* Single-line compact label. Long names are abbreviated by
+     formatTaskDisplayLabel() and further shortened responsively in
+     getVisibleBarLabel(). Anything that still overflows gets an
+     ellipsis; the full title is always available in the hover tooltip. */
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+  letter-spacing: 0.01em;
 }
 
 .task-pill__pct {
@@ -551,6 +555,131 @@
   font-weight: 450 !important;
 }
 
+/* Hover tooltip shown above/below any Gantt bar. Portaled to <body>
+   with `position: fixed` so it's never clipped by SVAR's containers,
+   the Gantt frame, or the page's scroll. `transform: translateX(-50%)`
+   centers it on the anchor point we computed from the bar's rect. */
+.task-pill-tooltip {
+  position: fixed;
+  z-index: 2000;
+  min-width: 220px;
+  max-width: 360px;
+  padding: 10px 12px 9px;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #0f172a;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow:
+    0 12px 30px -10px rgba(15, 23, 42, 0.28),
+    0 4px 10px -4px rgba(15, 23, 42, 0.14);
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 1.35;
+  opacity: 0;
+  animation: task-tooltip-in 90ms ease-out forwards;
+}
+
+.task-pill-tooltip--top {
+  transform: translate(-50%, -100%);
+}
+
+.task-pill-tooltip--bottom {
+  transform: translate(-50%, 0);
+}
+
+.task-pill-tooltip__name {
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: -0.005em;
+  color: #0f172a;
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
+}
+
+.task-pill-tooltip__meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  row-gap: 2px;
+  margin: 0;
+  padding: 0;
+}
+
+.task-pill-tooltip__meta > div {
+  display: contents;
+}
+
+.task-pill-tooltip__meta dt {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  align-self: center;
+}
+
+.task-pill-tooltip__meta dd {
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+}
+
+.task-pill-tooltip.urgency-high {
+  border-color: rgba(248, 113, 113, 0.45);
+  box-shadow:
+    0 12px 30px -10px rgba(220, 38, 38, 0.25),
+    0 4px 10px -4px rgba(220, 38, 38, 0.15);
+}
+
+.task-pill-tooltip.urgency-medium {
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+.task-pill-tooltip.urgency-low {
+  border-color: rgba(74, 222, 128, 0.45);
+}
+
+@keyframes task-tooltip-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.task-pill-tooltip--top {
+  animation-name: task-tooltip-in-top;
+}
+
+.task-pill-tooltip--bottom {
+  animation-name: task-tooltip-in-bottom;
+}
+
+@keyframes task-tooltip-in-top {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-100% + 4px));
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -100%);
+  }
+}
+
+@keyframes task-tooltip-in-bottom {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
 .gantt-frame .wx-scale .wx-cell {
   color: #7e869f !important;
   font-size: 11px !important;
@@ -564,6 +693,18 @@
   gap: 8px;
   width: 100%;
   min-width: 0;
+  /* The whole row cell is a single click target for editing the name.
+     Drag still works because the wrapper is also `draggable`; a pure
+     click (no drag motion) falls through to the edit forwarder. */
+  cursor: pointer;
+}
+
+/* The chip & badge inherit the row's pointer cursor so the entire
+   cell reads as one clickable surface rather than a mix of chrome
+   with an invisible edit zone next to it. */
+.task-cell-wrap .task-row-kind,
+.task-cell-wrap .task-row-badge {
+  cursor: pointer;
 }
 
 .task-cell-label {
@@ -575,6 +716,9 @@
 }
 
 .task-cell-text {
+  /* Grow to fill the remaining space in the cell so the full row reacts
+     to a single click, not just the text characters. */
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -917,10 +1061,11 @@
 .deps-cell-edit {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
   max-width: 100%;
-  padding: 2px 6px;
+  min-height: 28px;
+  padding: 4px 8px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -929,7 +1074,7 @@
   color: rgb(var(--muted-fg));
   letter-spacing: 0.01em;
   font-variant-numeric: tabular-nums;
-  cursor: text;
+  cursor: pointer;
   text-align: left;
   transition:
     background 120ms ease,
@@ -966,17 +1111,44 @@
   white-space: nowrap;
 }
 
+/* The "+" at the trailing edge of every dependency cell. Sized up so it
+   reads as a real affordance (not a hairline glyph) and wrapped in a
+   tinted circle so the click target stands out even when the cell is
+   otherwise empty. The SVG inside scales with font-size so width/height
+   on .deps-cell-edit-icon control the visible mark. */
 .deps-cell-edit-icon {
   flex: 0 0 auto;
-  opacity: 0;
-  color: rgb(var(--muted-fg));
-  transition: opacity 120ms ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  color: rgb(79 70 229);
+  background: rgba(79, 70, 229, 0.08);
+  opacity: 0.55;
+  transition:
+    opacity 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
+}
+
+.deps-cell-edit-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2.4;
 }
 
 .deps-cell-edit:hover .deps-cell-edit-icon,
 .deps-cell-edit:focus-visible .deps-cell-edit-icon,
 .deps-cell-edit--empty .deps-cell-edit-icon {
-  opacity: 0.75;
+  opacity: 1;
+  background: rgba(79, 70, 229, 0.16);
+}
+
+.deps-cell-edit:active .deps-cell-edit-icon {
+  transform: scale(0.94);
 }
 
 /* Redesigned dependency picker modal. */
@@ -1589,4 +1761,198 @@
   font-size: 11.5px;
   color: #64748b;
   line-height: 1.4;
+}
+
+/* -------------------------------------------------------------------
+   Resources column cell + dropdown picker
+   ------------------------------------------------------------------- */
+
+.grid-cell-meta--picker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 3px 8px;
+  margin: 0;
+  width: 100%;
+  min-height: 24px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.grid-cell-meta--picker:hover {
+  background: rgba(79, 70, 229, 0.06);
+  border-color: rgba(79, 70, 229, 0.22);
+}
+
+.grid-cell-meta--empty-picker {
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.grid-cell-meta-picker__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.grid-cell-meta-picker__chevron {
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+
+.grid-cell-meta--picker:hover .grid-cell-meta-picker__chevron {
+  color: #6366f1;
+}
+
+.resource-picker {
+  position: fixed;
+  z-index: 900;
+  min-width: 220px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px -12px rgba(15, 23, 42, 0.22),
+    0 2px 6px -2px rgba(15, 23, 42, 0.08);
+  animation: resource-picker-in 120ms ease-out;
+}
+
+@keyframes resource-picker-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.resource-picker__search {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 7px;
+  font-size: 12.5px;
+  line-height: 1.3;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  background: #ffffff;
+  color: #0f172a;
+}
+
+.resource-picker__search:focus {
+  border-color: rgba(79, 70, 229, 0.5);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.14);
+}
+
+.resource-picker__list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+  max-height: 260px;
+  padding: 2px;
+}
+
+.resource-picker__empty {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.resource-picker__item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #0f172a;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: background 0.1s ease;
+}
+
+.resource-picker__item--active {
+  background: rgba(79, 70, 229, 0.08);
+}
+
+.resource-picker__item--selected {
+  background: rgba(79, 70, 229, 0.12);
+}
+
+.resource-picker__item--unassign {
+  color: #64748b;
+  font-style: italic;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+  border-radius: 7px 7px 0 0;
+  margin-bottom: 2px;
+}
+
+.resource-picker__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 100%);
+  color: #3730a3;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+.resource-picker__item--unassign .resource-picker__avatar {
+  background: rgba(15, 23, 42, 0.05);
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.resource-picker__text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.resource-picker__name {
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-picker__role {
+  font-size: 10.5px;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-picker__check {
+  color: #4f46e5;
+  flex-shrink: 0;
 }

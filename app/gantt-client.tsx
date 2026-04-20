@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import "@svar-ui/react-gantt/all.css";
@@ -85,6 +86,86 @@ function fmtMonthYear(date: Date) {
 
 function fmtYear(date: Date) {
   return date.toLocaleDateString(undefined, { year: "numeric" });
+}
+
+// ---------------------------------------------------------------------------
+// Gantt bar label helpers
+// ---------------------------------------------------------------------------
+// Domain-specific abbreviation table for hardware / fab tooling names.
+// Ordered longest-first so multi-word terms are matched before any of
+// their component words. Extend this list as new tool categories show
+// up in the Notion import.
+const TASK_TERM_ABBREVIATIONS: Array<[RegExp, string]> = [
+  [/\bAtomic Layer Deposition\b/gi, "ALD"],
+  [/\bRapid Thermal Processing\b/gi, "RTP"],
+  [/\bReactive Ion Etching\b/gi, "RIE"],
+  [/\bWafer Automated Delivery\b/gi, "WAD"],
+  [/\bMachine Vision\b/gi, "MV"],
+  [/\bMagnetron Sputtering\b/gi, "Sputter"],
+  [/\bOzone Generator\b/gi, "Ozone Gen"],
+  [/\bPick and Place(?: System)?\b/gi, "Pick & Place"],
+  [/\bSpinal Column\b/gi, "Spine"],
+  [/\bInspection\b/gi, "Insp"],
+  [/\bEllipsometer\b/gi, "ELPS"],
+];
+
+// Repetitive "workstream :" prefixes that are already obvious from the
+// row's hierarchy context. Strip them so the bar text focuses on what's
+// actually unique.
+const REDUNDANT_PREFIX_RE =
+  /^(?:Tool Delivery|Cube Delivery|Tool Procurement|Cube Procurement|Delivery)\s*[:\-–]\s*/i;
+
+// Turn a raw task title into a compact display label by stripping
+// redundant prefixes, applying known abbreviations, and collapsing any
+// parenthetical that just restates the abbreviation. Pure + memoizable.
+export function formatTaskDisplayLabel(raw: string): string {
+  if (!raw) return "";
+  let s = raw.trim().replace(REDUNDANT_PREFIX_RE, "");
+  for (const [re, sub] of TASK_TERM_ABBREVIATIONS) s = s.replace(re, sub);
+  // After abbreviation, "ALD (ALD)" / "RTP (RTP)" are common. Drop the
+  // parenthetical if its contents appear anywhere in the non-paren part.
+  s = s.replace(/\s*\(([^()]+)\)/g, (_m, inner) => {
+    const token = String(inner).trim().toUpperCase();
+    const outside = s.replace(/\s*\([^()]+\)/g, "").toUpperCase();
+    return outside.includes(token) ? "" : ` (${inner})`;
+  });
+  return s.replace(/\s+/g, " ").trim();
+}
+
+// Bar-width thresholds that drive the responsive label. Exposed as a
+// named const so they're easy to tweak in one place.
+const LABEL_WIDTH_THRESHOLDS = {
+  /** Under this many pixels: don't render any label, just the % chip. */
+  hide: 34,
+  /** Under this many pixels: strip parentheticals / trailing qualifiers. */
+  compact: 110,
+} as const;
+
+// Given the compact display label and the live bar width, return the
+// string that should actually render inside the bar.
+export function getVisibleBarLabel(
+  displayLabel: string,
+  barWidthPx: number,
+): string {
+  if (!displayLabel) return "";
+  if (barWidthPx < LABEL_WIDTH_THRESHOLDS.hide) return "";
+  if (barWidthPx < LABEL_WIDTH_THRESHOLDS.compact) {
+    // Keep only the leading chunk before the first separator — usually
+    // just the abbreviation + count (e.g. "ALD x4").
+    return displayLabel.split(/\s+[(:–-]/)[0].trim();
+  }
+  return displayLabel;
+}
+
+function fmtTipDate(raw: unknown): string {
+  if (!raw) return "—";
+  const d = raw instanceof Date ? raw : new Date(String(raw));
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
 
 const ZOOM_SCALES: Record<
@@ -182,6 +263,17 @@ export default function GanttClient({
   } | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   const [addingTask, setAddingTask] = useState(false);
+  // Roster for the Resources column dropdown. Fetched once on mount so
+  // every task's picker shows the same canonical list of contributors
+  // without re-hitting the API per open.
+  const [people, setPeople] = useState<
+    Array<{ id: string; name: string; role: string | null; active: boolean }>
+  >([]);
+  const [resourcePicker, setResourcePicker] = useState<
+    | { taskId: string; anchor: { top: number; left: number; width: number } }
+    | null
+  >(null);
+  const [resourceQuery, setResourceQuery] = useState("");
   const [savedTick, setSavedTick] = useState(0);
   const [deleteModal, setDeleteModal] = useState<{
     id: string;
@@ -195,9 +287,56 @@ export default function GanttClient({
     return () => clearInterval(t);
   }, []);
 
+  // Fetch the contributor roster once. The People page also triggers
+  // the default-seed flow server-side on first visit; here we just read
+  // whatever's in the database so the dropdown reflects the same list
+  // users see on /people.
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/people")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => {
+        if (!alive) return;
+        if (Array.isArray(data)) {
+          setPeople(
+            data.filter(
+              (p: { active?: boolean }) => p?.active !== false,
+            ) as typeof people,
+          );
+        }
+      })
+      .catch(() => {
+        /* roster is non-critical; the column just shows empty */
+      });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function markSaved() {
     setLastSavedAt(Date.now());
   }
+
+  // Debounced server resync. Used by commit paths that update SVAR's
+  // internal store directly (inline cell edits) so that derived data
+  // from the server prop (levelById / urgencyById / depsByDependent /
+  // rollups) eventually catches up without hammering the server on
+  // every keystroke. Rapid consecutive edits coalesce into a single
+  // refresh after the user stops typing.
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleServerSync = () => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      router.refresh();
+    }, 350);
+  };
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    };
+  }, []);
 
   // Shared commit path for the inline single-click cell editors. Cells are
   // intentionally referentially stable (see TaskNameCell notes) so they
@@ -206,6 +345,15 @@ export default function GanttClient({
   const commitInlineEditRef = useRef<
     (id: string, payload: Record<string, unknown>) => Promise<void>
   >(async () => {});
+
+  // Registry of open-editor callbacks keyed by `${rowId}:${field}`. Every
+  // InlineEditable registers its `setEditing(true)` here on mount and
+  // cleans up on unmount. The frame-level pointer handler uses this to
+  // toggle a cell into edit mode without depending on the native click
+  // event firing — browsers can silently drop clicks that land on text
+  // inside a draggable ancestor, which was the root cause of the
+  // “sometimes I can’t edit the task name” bug.
+  const editorOpenersRef = useRef<Map<string, () => void>>(new Map());
 
   // Size the Task column once, on initial mount, to fit the longest task
   // name that actually ships with the page. Locked in via useState
@@ -389,7 +537,9 @@ export default function GanttClient({
       text?: string;
       progress?: number;
       urgency?: "high" | "medium" | "low";
+      start?: Date | string;
       end?: Date | string;
+      assignee?: string | null;
     };
   }) => {
     const id = data?.id != null ? String(data.id) : "";
@@ -421,36 +571,65 @@ export default function GanttClient({
       },
     };
     const colors = palette[urgency];
-    const label = data?.text ?? "";
+    const fullLabel = data?.text ?? "";
+    const displayLabel = useMemo(
+      () => formatTaskDisplayLabel(fullLabel),
+      [fullLabel],
+    );
 
-    // Detect when the bar is too narrow to show the full task name inside
-    // so we can spill the full text next to the bar instead of letting it
-    // truncate to a useless "Tool Deli…". Re-measured whenever the text
-    // changes or the bar resizes (zoom change, date drag, etc).
-    const nameRef = useRef<HTMLSpanElement | null>(null);
+    // Live bar width drives the responsive label. When the bar is
+    // narrow we progressively strip parentheticals / qualifiers or
+    // hide the label entirely so the UI stays clean — the full name
+    // is always available in the hover tooltip below.
     const pillRef = useRef<HTMLDivElement | null>(null);
-    const [clipped, setClipped] = useState(false);
+    const [barWidth, setBarWidth] = useState(0);
     useLayoutEffect(() => {
-      const nameEl = nameRef.current;
-      const pillEl = pillRef.current;
-      if (!nameEl || !pillEl) return;
-      const check = () => {
-        // Height-based check covers the -webkit-line-clamp truncation; width
-        // catches single-line names that horizontally overflow.
-        const truncated =
-          nameEl.scrollHeight > nameEl.clientHeight + 1 ||
-          nameEl.scrollWidth > nameEl.clientWidth + 1;
-        setClipped(truncated);
-      };
-      check();
-      const ro = new ResizeObserver(check);
-      ro.observe(nameEl);
-      ro.observe(pillEl);
+      const el = pillRef.current;
+      if (!el) return;
+      const update = () => setBarWidth(el.clientWidth);
+      update();
+      const ro = new ResizeObserver(update);
+      ro.observe(el);
       return () => ro.disconnect();
-    }, [label, pct]);
+    }, []);
+
+    const visibleLabel = useMemo(
+      () => getVisibleBarLabel(displayLabel, barWidth),
+      [displayLabel, barWidth],
+    );
+
+    // Hover tooltip. We portal it to <body> with fixed coords so it's
+    // never clipped by SVAR's `.wx-area` / `.wx-bars` overflow. Coords
+    // are resolved from the pill's live bounding rect so zoom, scroll,
+    // and date drags always produce an accurate anchor.
+    const [tipPos, setTipPos] = useState<
+      | { top: number; left: number; placement: "top" | "bottom" }
+      | null
+    >(null);
+    const showTooltip = () => {
+      const el = pillRef.current;
+      if (!el || typeof window === "undefined") return;
+      const r = el.getBoundingClientRect();
+      // Default above the bar; flip below if we'd clip the viewport top.
+      const placement = r.top < 96 ? "bottom" : "top";
+      const top =
+        placement === "top" ? r.top - 8 : r.bottom + 8;
+      const left = Math.max(
+        12,
+        Math.min(window.innerWidth - 12, r.left + r.width / 2),
+      );
+      setTipPos({ top, left, placement });
+    };
+    const hideTooltip = () => setTipPos(null);
+
+    const owner = (data?.assignee ?? "").trim();
 
     return (
-      <div className="task-pill-wrap">
+      <div
+        className="task-pill-wrap"
+        onMouseEnter={showTooltip}
+        onMouseLeave={hideTooltip}
+      >
         <div
           ref={pillRef}
           className={
@@ -469,25 +648,47 @@ export default function GanttClient({
             style={{ width: `${pct}%`, background: colors.fill }}
           />
           <div className="task-pill__text">
-            <span
-              className="task-pill__name"
-              ref={nameRef}
-              title={label}
-            >
-              {label}
-            </span>
+            {visibleLabel ? (
+              <span className="task-pill__name">{visibleLabel}</span>
+            ) : null}
             <span className="task-pill__pct">{pct}%</span>
           </div>
         </div>
-        {clipped && label && (
-          <span
-            className={`task-pill__overflow-label urgency-${urgency}`}
-            style={{ color: colors.text }}
-            aria-hidden="true"
-          >
-            {label}
-          </span>
-        )}
+        {tipPos && typeof document !== "undefined"
+          ? createPortal(
+              <div
+                className={`task-pill-tooltip task-pill-tooltip--${tipPos.placement} urgency-${urgency}`}
+                style={{
+                  top: tipPos.top,
+                  left: tipPos.left,
+                }}
+                role="tooltip"
+              >
+                <div className="task-pill-tooltip__name">{fullLabel}</div>
+                <dl className="task-pill-tooltip__meta">
+                  <div>
+                    <dt>Progress</dt>
+                    <dd>{pct}%</dd>
+                  </div>
+                  <div>
+                    <dt>Start</dt>
+                    <dd>{fmtTipDate(data?.start)}</dd>
+                  </div>
+                  <div>
+                    <dt>End</dt>
+                    <dd>{fmtTipDate(data?.end)}</dd>
+                  </div>
+                  {owner && (
+                    <div>
+                      <dt>Owner</dt>
+                      <dd>{owner}</dd>
+                    </div>
+                  )}
+                </dl>
+              </div>,
+              document.body,
+            )
+          : null}
       </div>
     );
   };
@@ -518,6 +719,7 @@ export default function GanttClient({
     function Inline(props: Props) {
       const {
         rowId,
+        field,
         rawValue,
         inputType,
         toPayload,
@@ -535,6 +737,22 @@ export default function GanttClient({
       const [editing, setEditing] = useState(false);
       const [draft, setDraft] = useState(rawValue);
       const inputRef = useRef<HTMLInputElement | null>(null);
+      const editKey = `${rowId}:${field}`;
+
+      // Register the opener so the frame-level pointerup handler can
+      // switch this cell into edit mode regardless of whether the
+      // native click event made it through. Read-only cells never
+      // register — there's no editor to open.
+      useEffect(() => {
+        if (readOnly) return;
+        const open = () => setEditing(true);
+        editorOpenersRef.current.set(editKey, open);
+        return () => {
+          if (editorOpenersRef.current.get(editKey) === open) {
+            editorOpenersRef.current.delete(editKey);
+          }
+        };
+      }, [editKey, readOnly]);
 
       useEffect(() => {
         if (!editing) setDraft(rawValue);
@@ -570,6 +788,12 @@ export default function GanttClient({
       };
 
       if (!editing) {
+        const justify =
+          align === "center"
+            ? "center"
+            : align === "right"
+              ? "flex-end"
+              : "flex-start";
         return (
           <span
             className={
@@ -580,11 +804,16 @@ export default function GanttClient({
             role={readOnly ? undefined : "button"}
             tabIndex={readOnly ? -1 : 0}
             title={readOnly ? readOnlyReason : "Click to edit"}
-            onClick={(e) => {
-              if (readOnly) return;
-              e.stopPropagation();
-              setEditing(true);
-            }}
+            style={{ justifyContent: justify }}
+            // Everything activation-related lives at the frame level.
+            // The span intentionally declares no onClick / onMouseDown /
+            // onPointerDown / onPointerUp — those all compete with the
+            // ancestor's draggable=true behavior, which is what made
+            // clicks on text characters feel flaky. The frame handler
+            // reads `data-edit-key` off this span and calls the
+            // registered opener on a clean pointerup that didn't travel.
+            draggable={false}
+            data-edit-key={editKey}
             onKeyDown={(e) => {
               if (readOnly) return;
               if (e.key === "Enter" || e.key === " " || e.key === "F2") {
@@ -665,19 +894,18 @@ export default function GanttClient({
           <span className="deps-cell-edit-text">
             {isEmpty ? "Add dependency…" : label}
           </span>
-          <svg
-            className="deps-cell-edit-icon"
-            viewBox="0 0 24 24"
-            width="12"
-            height="12"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            aria-hidden="true"
-          >
-            <path d="M12 5v14" />
-            <path d="M5 12h14" />
-          </svg>
+          <span className="deps-cell-edit-icon" aria-hidden="true">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M12 5v14" />
+              <path d="M5 12h14" />
+            </svg>
+          </span>
         </button>
       );
     }
@@ -837,18 +1065,31 @@ export default function GanttClient({
 
   const ResourcesCell = useMemo(() => {
     function Cell({ row }: { row: Record<string, unknown> }) {
+      const id = String(row?.id ?? "");
       const assignee = String(row?.assignee ?? "").trim();
-      const allocated = String(row?.resourceAllocated ?? "").trim();
-      const parts: string[] = [];
-      if (assignee) parts.push(assignee);
-      if (allocated && allocated !== assignee) parts.push(allocated);
-      if (parts.length === 0)
-        return <span className="grid-cell-meta grid-cell-meta--empty">—</span>;
-      const label = parts.join(" · ");
+      const label = assignee || "Assign…";
       return (
-        <span className="grid-cell-meta" title={label}>
-          {label}
-        </span>
+        <button
+          type="button"
+          className={
+            "grid-cell-meta grid-cell-meta--picker" +
+            (assignee ? "" : " grid-cell-meta--empty-picker")
+          }
+          data-resource-picker={id}
+          title={assignee ? `Assigned to ${assignee}` : "Assign a contributor"}
+        >
+          <span className="grid-cell-meta-picker__label">{label}</span>
+          <svg
+            className="grid-cell-meta-picker__chevron"
+            viewBox="0 0 20 20"
+            width="10"
+            height="10"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <path d="M5 7l5 6 5-6z" />
+          </svg>
+        </button>
       );
     }
     Cell.displayName = "ResourcesCell";
@@ -1225,6 +1466,8 @@ export default function GanttClient({
         startDate?: string | Date;
         endDate?: string | Date;
         effortHours?: number | null;
+        assignee?: string | null;
+        resourceAllocated?: string | null;
       };
       const prevState = knownTaskState.current.get(id);
       const startMs = t.startDate ? new Date(t.startDate).getTime() : prevState?.startMs ?? 0;
@@ -1255,6 +1498,11 @@ export default function GanttClient({
             end: new Date(endMs),
             effortHours:
               t.effortHours === undefined ? prevState?.effortHours ?? null : t.effortHours,
+            // Push the new assignee straight into SVAR's row so the
+            // Resources cell and bar tooltip update instantly, without
+            // waiting on the debounced server refresh.
+            assignee: t.assignee ?? null,
+            resourceAllocated: t.resourceAllocated ?? null,
           },
           eventSource: "server-reschedule",
         });
@@ -1264,6 +1512,10 @@ export default function GanttClient({
       applyAffected(affected);
       markSaved();
       setStatus("");
+      // Resync server props so levelById / urgencyById / dep maps and
+      // parent rollups reflect this edit without a manual page refresh.
+      // Debounced so rapid edits across multiple cells coalesce.
+      scheduleServerSync();
     } catch (err) {
       console.error(err);
       setStatus("Save failed");
@@ -1489,6 +1741,11 @@ export default function GanttClient({
           );
           if (!data?.existed) markSaved();
           setTimeout(() => setStatus(""), 900);
+          // Resync the server-fetched tasks so the left-pane
+          // "Depends on" column rebuilds with the new predecessor name.
+          // Without this, a drag-drawn arrow on the chart shows as a
+          // link but the row still reads "Add dependency…".
+          scheduleServerSync();
         })
         .catch((e: unknown) => {
           // Revert unsaved visual link on failure.
@@ -1505,9 +1762,15 @@ export default function GanttClient({
       const id = linkIdAlias.current.get(incomingId) ?? incomingId;
       if (!id) return;
       linkIdAlias.current.delete(incomingId);
-      fetch(`/api/dependencies/${id}`, { method: "DELETE" }).catch(() => {
-        /* ignore */
-      });
+      fetch(`/api/dependencies/${id}`, { method: "DELETE" })
+        .then(() => {
+          // Rebuild the left-pane "Depends on" column text so the
+          // deleted predecessor name disappears immediately.
+          scheduleServerSync();
+        })
+        .catch(() => {
+          /* ignore */
+        });
     });
 
     api.on("delete-task", (raw: unknown) => {
@@ -1727,6 +1990,20 @@ export default function GanttClient({
     }
   }
 
+  // Persist an assignee selection for the currently-open resource
+  // picker. Goes through the shared commit path so we get the same
+  // optimistic update / server resync / rollup behavior as other
+  // inline edits.
+  async function assignResource(name: string | null) {
+    if (!resourcePicker) return;
+    const { taskId } = resourcePicker;
+    setResourcePicker(null);
+    setResourceQuery("");
+    await commitInlineEditRef.current(taskId, {
+      assignee: name ?? null,
+    });
+  }
+
   useEffect(() => {
     const root = frameRef.current;
     if (!root) return;
@@ -1768,6 +2045,29 @@ export default function GanttClient({
         if (id) openDependencyEditor(id);
         return;
       }
+      const resourceBtn = target?.closest(
+        "[data-resource-picker]",
+      ) as HTMLElement | null;
+      if (resourceBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const id = resourceBtn.getAttribute("data-resource-picker");
+        if (id) {
+          // Anchor the dropdown just below the cell button so the menu
+          // feels attached to the cell.
+          const rect = resourceBtn.getBoundingClientRect();
+          setResourceQuery("");
+          setResourcePicker({
+            taskId: id,
+            anchor: {
+              top: rect.bottom + 4,
+              left: rect.left,
+              width: Math.max(rect.width, 220),
+            },
+          });
+        }
+        return;
+      }
 
       // Selection: modifier-click selects rows for bulk drag / bulk
       // context-menu actions. We explicitly avoid activating on inline
@@ -1779,8 +2079,12 @@ export default function GanttClient({
       const onGrip = !!target?.closest("[data-task-drag-handle]");
       const hasModifier = ev.shiftKey || ev.metaKey || ev.ctrlKey;
 
-      if (row && (hasModifier || onGrip)) {
-        // Eat the click so inline-edit mode doesn't engage on the task name.
+      // Modifier clicks still drive bulk selection. We specifically do
+      // NOT treat a plain grip click as "select the row" anymore — users
+      // kept clicking near the grip expecting to edit the task name, and
+      // got a silent selection instead. Drag still works because drag
+      // uses `dragstart`, not `click`.
+      if (row && hasModifier) {
         ev.preventDefault();
         ev.stopPropagation();
         const id = row.getAttribute("data-task-drag-id");
@@ -1802,7 +2106,7 @@ export default function GanttClient({
               setSelectedIds(new Set(order.slice(lo, hi + 1)));
             }
           }
-        } else if (ev.metaKey || ev.ctrlKey) {
+        } else {
           selectAnchorIdRef.current = id;
           setSelectedIds((prev) => {
             const next = new Set(prev);
@@ -1810,20 +2114,84 @@ export default function GanttClient({
             else next.add(id);
             return next;
           });
-        } else {
-          // Plain click on the drag grip: select just this row.
-          selectAnchorIdRef.current = id;
-          setSelectedIds(new Set([id]));
         }
         return;
       }
 
       // Click landed outside a task row (e.g. blank toolbar area). If it
       // wasn't inside an input, clear the selection so it doesn't linger.
+      // (Actual edit activation happens on pointerup — see below.)
       if (!row && !onInlineInput && selectedIdsRef.current.size > 0) {
         setSelectedIds(new Set());
         selectAnchorIdRef.current = null;
       }
+    };
+
+    // Unified edit activation. A "click" that's meant to open a cell's
+    // editor is any pointerdown + pointerup pair that didn't travel far
+    // (so it isn't a drag) and didn't land on a real control. We track
+    // it at the frame level because native `click` gets silently dropped
+    // when the pointer lands on text inside a draggable ancestor, which
+    // was the source of "sometimes I can't edit the task string".
+    const INTERACTIVE_SELECTOR = [
+      "button",
+      "input",
+      "select",
+      "textarea",
+      ".inline-edit-input",
+      "[data-deps-cell-edit]",
+      "[data-resource-picker]",
+      "[data-assign-parent]",
+      "[data-deps-edit]",
+      "[data-task-delete]",
+      "[data-task-drag-handle]",
+    ].join(",");
+    let pdX = 0;
+    let pdY = 0;
+    let pdValid = false;
+    const onEditPointerDown = (ev: PointerEvent) => {
+      // Primary button only.
+      if (ev.button !== 0) {
+        pdValid = false;
+        return;
+      }
+      pdX = ev.clientX;
+      pdY = ev.clientY;
+      pdValid = true;
+    };
+    const onEditPointerUp = (ev: PointerEvent) => {
+      if (!pdValid) return;
+      pdValid = false;
+      if (ev.button !== 0) return;
+      // Modifier-click is reserved for bulk selection — skip editing.
+      if (ev.shiftKey || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+      const dx = Math.abs(ev.clientX - pdX);
+      const dy = Math.abs(ev.clientY - pdY);
+      if (dx > 4 || dy > 4) return;
+
+      const target = ev.target as HTMLElement | null;
+      if (!target) return;
+      // Real controls handle their own clicks (and have their own click
+      // listeners installed on this frame). Don't hijack them.
+      if (target.closest(INTERACTIVE_SELECTOR)) return;
+
+      // Find the editable span sitting in this grid cell. Fall back to
+      // the task row for cases where the .wx-cell wrapper isn't present.
+      const cell = target.closest(".wx-cell") as HTMLElement | null;
+      const row = target.closest("[data-task-drag-id]") as HTMLElement | null;
+      const scope = cell ?? row;
+      if (!scope) return;
+      const span = scope.querySelector(
+        ".inline-edit-display:not(.inline-edit-display--readonly)",
+      ) as HTMLElement | null;
+      if (!span) return;
+      const key = span.dataset.editKey;
+      if (!key) return;
+      const opener = editorOpenersRef.current.get(key);
+      if (!opener) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      opener();
     };
 
     // Right-click on any task row opens a small floating action menu.
@@ -1961,24 +2329,43 @@ export default function GanttClient({
       void reparentTasks(batch, dropId);
     };
 
-    // SVAR attaches a container-level mousedown listener that boots its own
-    // row-reorder drag on every mousedown inside the grid. That reorder runs
-    // in parallel with our HTML5 drag, and on drop the two try to move the
-    // same task (one via our API PATCH, one via SVAR's in-memory tree) — the
-    // visible result is stale rows and ghost positions. Capture mousedown on
-    // draggable task rows and stop it before SVAR sees it, so only our drag
-    // logic runs. Clicks and selection still work because `click` is a
-    // synthesized event with its own dispatch.
+    // SVAR attaches a container-level mousedown listener that boots its
+    // own row-reorder drag on every mousedown inside the grid. We stop
+    // that propagation for non-interactive row chrome so SVAR's drag
+    // doesn't fight with ours. Interactive controls (inputs, buttons,
+    // the grip, etc.) are allowed through so their native behavior
+    // still works.
     const onMouseDownCapture = (ev: MouseEvent) => {
       const target = ev.target as HTMLElement | null;
       if (!target) return;
-      if (target.closest("[data-task-drag-id]")) {
-        ev.stopPropagation();
-      }
+      if (!target.closest("[data-task-drag-id]")) return;
+
+      const allowThrough =
+        target.closest(".inline-edit-display") ||
+        target.closest(".inline-edit-input") ||
+        target.closest("[data-task-drag-handle]") ||
+        target.closest("[data-deps-cell-edit]") ||
+        target.closest("[data-resource-picker]") ||
+        target.closest("[data-assign-parent]") ||
+        target.closest("[data-deps-edit]") ||
+        target.closest("[data-task-delete]") ||
+        target.closest("button") ||
+        target.closest("input") ||
+        target.closest("select") ||
+        target.closest("textarea");
+
+      if (allowThrough) return;
+      ev.stopPropagation();
     };
 
     root.addEventListener("click", onClick);
     root.addEventListener("mousedown", onMouseDownCapture, true);
+    // Pointer events bubble to us regardless of whether the browser
+    // decides to synthesize a click (draggable ancestors can suppress
+    // clicks on text nodes). We use them as the single source of truth
+    // for opening inline cell editors.
+    root.addEventListener("pointerdown", onEditPointerDown);
+    root.addEventListener("pointerup", onEditPointerUp);
     // Capture phase: run before SVAR's internal dragstart handler
     // (which would otherwise preventDefault and cancel the drag).
     root.addEventListener("dragstart", onDragStart, true);
@@ -1992,6 +2379,8 @@ export default function GanttClient({
     return () => {
       root.removeEventListener("click", onClick);
       root.removeEventListener("mousedown", onMouseDownCapture, true);
+      root.removeEventListener("pointerdown", onEditPointerDown);
+      root.removeEventListener("pointerup", onEditPointerUp);
       root.removeEventListener("dragstart", onDragStart, true);
       root.removeEventListener("dragend", onDragEnd, true);
       root.removeEventListener("dragover", onDragOver);
@@ -2277,6 +2666,23 @@ export default function GanttClient({
           levelForRow={levelForRow}
           depthById={depthById}
           childCountById={childCountById}
+        />
+      )}
+
+      {resourcePicker && (
+        <ResourcePicker
+          anchor={resourcePicker.anchor}
+          people={people}
+          currentAssignee={
+            tasks.find((t) => t.id === resourcePicker.taskId)?.assignee ?? null
+          }
+          query={resourceQuery}
+          setQuery={setResourceQuery}
+          onCancel={() => {
+            setResourcePicker(null);
+            setResourceQuery("");
+          }}
+          onSelect={(name) => void assignResource(name)}
         />
       )}
 
@@ -2983,6 +3389,193 @@ function ParentPicker({
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Floating dropdown used by the Resources column. Renders at the
+// click coordinates supplied by the parent so the menu feels attached
+// to the cell it was opened from, with keyboard search, arrow keys,
+// and an explicit "Unassigned" option so users can clear an assignee
+// without going back through the People page.
+function ResourcePicker({
+  anchor,
+  people,
+  currentAssignee,
+  query,
+  setQuery,
+  onCancel,
+  onSelect,
+}: {
+  anchor: { top: number; left: number; width: number };
+  people: Array<{ id: string; name: string; role: string | null }>;
+  currentAssignee: string | null;
+  query: string;
+  setQuery: (q: string) => void;
+  onCancel: () => void;
+  onSelect: (name: string | null) => void;
+}) {
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  useEffect(() => {
+    searchRef.current?.focus();
+  }, []);
+
+  // Dismiss on outside click, scroll, resize, or Escape.
+  useEffect(() => {
+    const onDocMouseDown = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (t && menuRef.current && menuRef.current.contains(t)) return;
+      onCancel();
+    };
+    const onScroll = () => onCancel();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onCancel]);
+
+  type Option = { id: string; name: string | null; role: string | null };
+  const options: Option[] = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const filtered = q
+      ? people.filter(
+          (p) =>
+            p.name.toLowerCase().includes(q) ||
+            (p.role ?? "").toLowerCase().includes(q),
+        )
+      : people;
+    return [
+      { id: "__unassigned__", name: null, role: null },
+      ...filtered.map((p) => ({ id: p.id, name: p.name, role: p.role })),
+    ];
+  }, [people, query]);
+
+  // Keep the highlight within bounds as the option list shrinks.
+  useEffect(() => {
+    if (activeIndex >= options.length) setActiveIndex(0);
+  }, [options.length, activeIndex]);
+
+  const commit = (idx: number) => {
+    const opt = options[idx];
+    if (!opt) return;
+    onSelect(opt.name);
+  };
+
+  // Clamp within viewport so menus opened near the bottom of the grid
+  // don't render off-screen.
+  const top = Math.min(anchor.top, window.innerHeight - 340);
+  const left = Math.min(anchor.left, window.innerWidth - anchor.width - 12);
+
+  return (
+    <div
+      ref={menuRef}
+      className="resource-picker"
+      style={{ top, left, width: anchor.width }}
+      role="listbox"
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <input
+        ref={searchRef}
+        type="text"
+        className="resource-picker__search"
+        placeholder="Search contributors…"
+        value={query}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setActiveIndex(0);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setActiveIndex((i) => Math.min(options.length - 1, i + 1));
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setActiveIndex((i) => Math.max(0, i - 1));
+          } else if (e.key === "Enter") {
+            e.preventDefault();
+            commit(activeIndex);
+          }
+        }}
+      />
+      <div className="resource-picker__list">
+        {options.length === 1 && query.trim() ? (
+          <div className="resource-picker__empty">
+            No contributors match “{query.trim()}”.
+          </div>
+        ) : null}
+        {options.map((opt, idx) => {
+          const isSelected =
+            (opt.name ?? null) === (currentAssignee ?? null);
+          const isActive = idx === activeIndex;
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              role="option"
+              aria-selected={isSelected}
+              className={
+                "resource-picker__item" +
+                (isActive ? " resource-picker__item--active" : "") +
+                (isSelected ? " resource-picker__item--selected" : "") +
+                (opt.name === null ? " resource-picker__item--unassign" : "")
+              }
+              onMouseEnter={() => setActiveIndex(idx)}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                commit(idx);
+              }}
+            >
+              <span className="resource-picker__avatar" aria-hidden="true">
+                {opt.name
+                  ? opt.name
+                      .split(/\s+/)
+                      .map((p) => p[0])
+                      .join("")
+                      .slice(0, 2)
+                      .toUpperCase()
+                  : "∅"}
+              </span>
+              <span className="resource-picker__text">
+                <span className="resource-picker__name">
+                  {opt.name ?? "Unassigned"}
+                </span>
+                {opt.role ? (
+                  <span className="resource-picker__role">{opt.role}</span>
+                ) : null}
+              </span>
+              {isSelected ? (
+                <svg
+                  className="resource-picker__check"
+                  viewBox="0 0 20 20"
+                  width="14"
+                  height="14"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M4 10l4 4 8-9" />
+                </svg>
+              ) : null}
+            </button>
+          );
+        })}
       </div>
     </div>
   );

@@ -1193,6 +1193,35 @@
   color: #dc2626;
 }
 
+/* Milestone entry gets a gold tint so it's obvious it's the action
+   that will drop a star on the chart. Icon keeps its fill from the
+   inline SVG props. */
+.task-context-item--milestone:hover,
+.task-context-item--milestone:focus-visible {
+  background: rgba(250, 204, 21, 0.18);
+}
+
+.task-context-item--milestone .task-context-icon {
+  color: #b45309;
+}
+
+.task-context-label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.task-context-parent {
+  font-size: 11.5px;
+  color: #92400e;
+  font-weight: 600;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Parent picker inherits most of the deps-picker styling; these are the
    tweaks that make it feel right for a single-select move action. */
 .parent-picker .deps-picker-list {
@@ -2301,8 +2330,8 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 28px;
-  height: 28px;
+  width: 34px;
+  height: 34px;
   display: inline-block;
   pointer-events: auto;
   cursor: pointer;
@@ -2312,18 +2341,18 @@
   position: absolute;
   inset: 0;
   z-index: 1;
-  filter: drop-shadow(0 1px 2px rgba(202, 138, 4, 0.35));
+  filter: drop-shadow(0 2px 4px rgba(202, 138, 4, 0.5));
   transform-origin: center;
   animation: milestone-pulse 1.6s ease-in-out infinite;
 }
 
 .milestone-star__glow {
   position: absolute;
-  inset: -6px;
+  inset: -10px;
   border-radius: 50%;
   background: radial-gradient(
     closest-side,
-    rgba(250, 204, 21, 0.55),
+    rgba(250, 204, 21, 0.7),
     rgba(250, 204, 21, 0)
   );
   animation: milestone-glow 1.6s ease-in-out infinite;
@@ -2333,7 +2362,7 @@
 .milestone-star__glyph {
   fill: #facc15;
   stroke: #b45309;
-  stroke-width: 0.6;
+  stroke-width: 0.75;
   stroke-linejoin: round;
   stroke-linecap: round;
 }
@@ -2371,24 +2400,27 @@
 
 .milestone-star__label {
   position: absolute;
-  /* Sit to the right of the star core (22px half-width + 6px gap
-     from the bar's center line). Vertically centered. */
+  /* Sit to the right of the star core (half of 34px + gap). Vertically
+     centered on the star's midline so the label always reads as a
+     nameplate for THIS star, not a floating pill. */
   top: 50%;
-  left: calc(50% + 22px);
+  left: calc(50% + 24px);
   transform: translateY(-50%);
   font:
-    600 11px/1.15 "Inter",
+    700 12px/1.2 "Inter",
     ui-sans-serif,
     system-ui,
     sans-serif;
   color: #78350f;
   letter-spacing: 0.01em;
-  background: rgba(255, 251, 235, 0.92);
-  padding: 2px 7px;
+  background: linear-gradient(180deg, #fffbeb 0%, #fef3c7 100%);
+  padding: 3px 9px;
   border-radius: 999px;
-  border: 1px solid rgba(202, 138, 4, 0.45);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-  max-width: 220px;
+  border: 1px solid rgba(202, 138, 4, 0.55);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.06),
+    0 0 0 2px rgba(250, 204, 21, 0.15);
+  max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
   pointer-events: auto;

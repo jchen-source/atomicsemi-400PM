@@ -3752,30 +3752,47 @@ export default function GanttClient({
             </button>
           )}
           {contextMenu.scope.length === 1 &&
-            tasks.find((t) => t.id === contextMenu.taskId)?.rowType !==
-              "MILESTONE" && (
-              <button
-                type="button"
-                className="task-context-item"
-                onClick={() => {
-                  const id = contextMenu.taskId;
-                  setContextMenu(null);
-                  void createMilestone(id);
-                }}
-              >
-                <span className="task-context-icon" aria-hidden="true">
-                  <svg
-                    viewBox="0 0 24 24"
-                    width="14"
-                    height="14"
-                    fill="currentColor"
-                  >
-                    <path d="M12 1 Q12.55 11.45 23 12 Q12.55 12.55 12 23 Q11.45 12.55 1 12 Q11.45 11.45 12 1 Z" />
-                  </svg>
-                </span>
-                Add milestone at end
-              </button>
-            )}
+            (() => {
+              const row = tasks.find((t) => t.id === contextMenu.taskId);
+              if (!row || row.rowType === "MILESTONE") return null;
+              // Quote-truncate the parent's label so the menu stays narrow
+              // even on chatty workstream names.
+              const raw = row.text ?? "this row";
+              const name = raw.length > 36 ? raw.slice(0, 34) + "…" : raw;
+              const endLabel = row.end
+                ? shortDate(new Date(row.end))
+                : "end date";
+              return (
+                <button
+                  type="button"
+                  className="task-context-item task-context-item--milestone"
+                  onClick={() => {
+                    const id = contextMenu.taskId;
+                    setContextMenu(null);
+                    void createMilestone(id);
+                  }}
+                  title={`Drop a milestone star on ${endLabel}, the current end of "${raw}"`}
+                >
+                  <span className="task-context-icon" aria-hidden="true">
+                    <svg
+                      viewBox="0 0 24 24"
+                      width="14"
+                      height="14"
+                      fill="#facc15"
+                      stroke="#b45309"
+                      strokeWidth="0.6"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M12 1 Q12.55 11.45 23 12 Q12.55 12.55 12 23 Q11.45 12.55 1 12 Q11.45 11.45 12 1 Z" />
+                    </svg>
+                  </span>
+                  <span className="task-context-label">
+                    <span>Add milestone at end of</span>
+                    <span className="task-context-parent">“{name}”</span>
+                  </span>
+                </button>
+              );
+            })()}
           <button
             type="button"
             className="task-context-item"
@@ -4196,8 +4213,8 @@ function MilestoneBar({
         <span className="milestone-star__glow" />
         <svg
           viewBox="0 0 24 24"
-          width="28"
-          height="28"
+          width="34"
+          height="34"
           aria-hidden="true"
           focusable="false"
           className="milestone-star__svg"

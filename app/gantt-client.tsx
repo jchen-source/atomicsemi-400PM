@@ -298,6 +298,14 @@ export default function GanttClient({
   >(null);
   const [savedTick, setSavedTick] = useState(0);
 
+  // Task search. `searchOpen` toggles the inline input in the toolbar;
+  // `searchQuery` is the live text. Matches are applied to rows via a
+  // DOM effect so we don't have to rebuild the tasks array (which would
+  // re-init SVAR and flash the chart).
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
   // Undo stack. Each entry knows how to reverse a user-visible mutation
   // (patch a task back to prior values, recreate a deleted link, etc.).
   // We hold the stack in a ref so pushes don't trigger renders — a
@@ -427,6 +435,30 @@ export default function GanttClient({
       }
       e.preventDefault();
       void undoLastRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Cmd/Ctrl+F opens the inline task search. We only hijack the
+  // browser's find shortcut when focus is inside the roadmap wrapper
+  // so the user can still page-search elsewhere.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.shiftKey || e.altKey) return;
+      const wrap = frameRef.current;
+      if (!wrap) return;
+      const active = document.activeElement as HTMLElement | null;
+      const insideRoadmap = active ? wrap.contains(active) : false;
+      // Also trigger if nothing's focused (common state after a click
+      // on the chart): the user clearly wants to find a task here.
+      const noFocus = !active || active === document.body;
+      if (!insideRoadmap && !noFocus) return;
+      e.preventDefault();
+      setSearchOpen(true);
+      setTimeout(() => searchInputRef.current?.focus(), 0);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -3094,6 +3126,183 @@ export default function GanttClient({
     }
   }
 
+  /**
+   * Expand / collapse every parent row (anything with children) via SVAR's
+   * internal open-task / close-task actions. We iterate only the actual
+   * parent ids instead of calling it blindly on every task, both for
+   * performance and because calling open-task on a leaf is a no-op but
+   * still triggers a store update.
+   */
+  function setAllExpanded(expanded: boolean) {
+    const api = apiRef.current;
+    if (!api) return;
+    const action = expanded ? "open-task" : "close-task";
+    for (const t of tasks) {
+      const kids = childCountByIdRef.current.get(t.id) ?? 0;
+      if (kids <= 0) continue;
+      try {
+        api.exec(action, { id: t.id });
+      } catch {
+        /* older SVAR versions might not accept this action for some rows */
+      }
+    }
+    setStatus(expanded ? "Expanded all." : "Collapsed all.");
+    setTimeout(() => setStatus(""), 1000);
+  }
+
+  // Compute the set of task ids relevant to the current search query.
+  // `directMatchIds` = rows whose text actually contains the query;
+  // `searchMatchIds` extends that with all their ancestors so matches
+  // aren't hidden inside collapsed parents. Null means "no active
+  // search" — the effect below skips masking DOM rows in that case.
+  const directMatchIds = useMemo<Set<string> | null>(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return null;
+    const m = new Set<string>();
+    for (const t of tasks) if (t.text.toLowerCase().includes(q)) m.add(t.id);
+    return m;
+  }, [searchQuery, tasks]);
+
+  const searchMatchIds = useMemo<Set<string> | null>(() => {
+    if (!directMatchIds) return null;
+    if (directMatchIds.size === 0) return directMatchIds;
+    const byId = new Map(tasks.map((t) => [t.id, t]));
+    const full = new Set<string>(directMatchIds);
+    for (const id of directMatchIds) {
+      let cur = byId.get(id)?.parent ?? null;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        full.add(cur);
+        cur = byId.get(cur)?.parent ?? null;
+      }
+    }
+    return full;
+  }, [directMatchIds, tasks]);
+
+  // Keep the latest match set in a ref so the MutationObserver-driven
+  // painter below always re-paints against current state without needing
+  // to be torn down and rebuilt on every keystroke.
+  const searchMatchRef = useRef<Set<string> | null>(null);
+  const searchPaintRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    searchMatchRef.current = searchMatchIds;
+  }, [searchMatchIds]);
+
+  // Apply the search to DOM rows. We paint .is-search-hidden and
+  // .is-search-match classes directly instead of rebuilding the tasks
+  // array (which would re-init the SVAR chart). SVAR virtualizes rows,
+  // so a MutationObserver re-runs the painter whenever rows mount or
+  // re-render. On first keystroke we also open all ancestors of
+  // matches so nothing stays buried inside a collapsed parent, and
+  // scroll the first match into view.
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+
+    const paint = () => {
+      const matches = searchMatchRef.current;
+      const rows = frame.querySelectorAll<HTMLElement>("[data-task-drag-id]");
+      if (!matches) {
+        rows.forEach((r) => {
+          r.classList.remove("is-search-match");
+          const rowEl = r.closest(".wx-row") as HTMLElement | null;
+          rowEl?.classList.remove("is-search-hidden", "is-search-match");
+        });
+        frame
+          .querySelectorAll<HTMLElement>(".wx-bar.is-search-match")
+          .forEach((el) => el.classList.remove("is-search-match"));
+        return;
+      }
+      rows.forEach((r) => {
+        const id = r.getAttribute("data-task-drag-id");
+        const rowEl = r.closest(".wx-row") as HTMLElement | null;
+        if (id && matches.has(id)) {
+          r.classList.add("is-search-match");
+          rowEl?.classList.add("is-search-match");
+          rowEl?.classList.remove("is-search-hidden");
+        } else {
+          r.classList.remove("is-search-match");
+          rowEl?.classList.remove("is-search-match");
+          rowEl?.classList.add("is-search-hidden");
+        }
+      });
+      frame.querySelectorAll<HTMLElement>(".wx-bar").forEach((bar) => {
+        const inner = bar.querySelector<HTMLElement>("[data-bar-id]");
+        const id = inner?.getAttribute("data-bar-id");
+        if (id && matches.has(id)) bar.classList.add("is-search-match");
+        else bar.classList.remove("is-search-match");
+      });
+    };
+
+    // Re-paint when SVAR swaps or reorders row DOM (virtualization,
+    // expand/collapse, drag, etc). Coalesce with rAF so bursts of
+    // mutations turn into a single paint.
+    let raf = 0;
+    const schedule = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        paint();
+      });
+    };
+    const mo = new MutationObserver(schedule);
+    mo.observe(frame, { subtree: true, childList: true });
+
+    paint();
+
+    // Expose the painter + any pending first-match scroll for the
+    // query-driven effect below.
+    searchPaintRef.current = paint;
+
+    return () => {
+      cancelAnimationFrame(raf);
+      mo.disconnect();
+      searchPaintRef.current = null;
+    };
+  }, []);
+
+  // When the query changes: expand ancestors of matches, ask the
+  // painter to repaint, and scroll the first match into view.
+  useEffect(() => {
+    searchPaintRef.current?.();
+    if (!searchMatchIds || searchMatchIds.size === 0) return;
+    const api = apiRef.current;
+    if (api) {
+      const byId = new Map(tasks.map((t) => [t.id, t]));
+      for (const id of searchMatchIds) {
+        let cur = byId.get(id)?.parent ?? null;
+        const seen = new Set<string>();
+        while (cur && !seen.has(cur)) {
+          seen.add(cur);
+          try {
+            api.exec("open-task", { id: cur });
+          } catch {
+            /* ignore */
+          }
+          cur = byId.get(cur)?.parent ?? null;
+        }
+      }
+    }
+    // Defer the scroll so open-task mutations have a chance to land
+    // in the DOM before we ask the browser to center on the row.
+    const t = setTimeout(() => {
+      const frame = frameRef.current;
+      if (!frame) return;
+      const firstId = directMatchIds
+        ? Array.from(directMatchIds)[0]
+        : undefined;
+      if (!firstId) return;
+      const el = frame.querySelector<HTMLElement>(
+        `[data-task-drag-id="${CSS.escape(firstId)}"]`,
+      );
+      const rowEl = (el?.closest(".wx-row") as HTMLElement | null) ?? el;
+      rowEl?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 30);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchMatchIds, directMatchIds]);
+
   async function autoChainDependencies() {
     setStatus("Creating automatic dependencies…");
     try {
@@ -3145,6 +3354,132 @@ export default function GanttClient({
             </button>
           ))}
         </div>
+        <div className="gantt-controls-divider" aria-hidden />
+        <div className="gantt-search" role="search">
+          {searchOpen ? (
+            <>
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="gantt-search__icon"
+                aria-hidden="true"
+              >
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3.5-3.5" />
+              </svg>
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setSearchQuery("");
+                    setSearchOpen(false);
+                  }
+                }}
+                placeholder="Search tasks…"
+                className="gantt-search__input"
+                aria-label="Search tasks"
+              />
+              {searchQuery && directMatchIds && (
+                <span className="gantt-search__count">
+                  {directMatchIds.size} match
+                  {directMatchIds.size === 1 ? "" : "es"}
+                </span>
+              )}
+              <button
+                type="button"
+                className="gantt-search__close"
+                onClick={() => {
+                  setSearchQuery("");
+                  setSearchOpen(false);
+                }}
+                title="Close search (Esc)"
+                aria-label="Close search"
+              >
+                ×
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchOpen(true);
+                setTimeout(() => searchInputRef.current?.focus(), 0);
+              }}
+              className="gantt-linkmode-btn"
+              title="Search tasks"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="13"
+                height="13"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{ marginRight: 5, verticalAlign: "-1px" }}
+              >
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3.5-3.5" />
+              </svg>
+              Search
+            </button>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => setAllExpanded(true)}
+          className="gantt-linkmode-btn"
+          title="Expand all parent rows"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="13"
+            height="13"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{ marginRight: 5, verticalAlign: "-1px" }}
+          >
+            <path d="M6 9l6 6 6-6" />
+            <path d="M6 4l6 6 6-6" />
+          </svg>
+          Expand all
+        </button>
+        <button
+          type="button"
+          onClick={() => setAllExpanded(false)}
+          className="gantt-linkmode-btn"
+          title="Collapse all parent rows"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="13"
+            height="13"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{ marginRight: 5, verticalAlign: "-1px" }}
+          >
+            <path d="M6 15l6-6 6 6" />
+            <path d="M6 20l6-6 6 6" />
+          </svg>
+          Collapse all
+        </button>
         <div className="gantt-controls-divider" aria-hidden />
         <button
           type="button"

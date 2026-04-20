@@ -244,6 +244,88 @@
   color: #ffffff;
 }
 
+/* Inline task search in the toolbar. Collapses to a simple "Search"
+   button until opened, then expands into an input + match count + close. */
+.gantt-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid #d4d4d8;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 1px 1px rgba(17, 24, 39, 0.03);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.gantt-search:focus-within {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+.gantt-search:has(.gantt-linkmode-btn) {
+  /* When collapsed, don't double up the border around the inner button. */
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+.gantt-search__icon {
+  color: #71717a;
+  flex: 0 0 auto;
+}
+.gantt-search__input {
+  appearance: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: 12.5px;
+  color: #111827;
+  min-width: 180px;
+  padding: 0;
+  line-height: 28px;
+}
+.gantt-search__input::placeholder {
+  color: #a1a1aa;
+}
+.gantt-search__count {
+  font-size: 11px;
+  color: #6b7280;
+  background: #f4f4f5;
+  border: 1px solid #e4e4e7;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.gantt-search__close {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #6b7280;
+  font-size: 17px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.gantt-search__close:hover {
+  color: #111827;
+  background: #f4f4f5;
+}
+
+/* Search result styling. We hide non-matching rows and give matching
+   rows a soft left-rail highlight so the match reads at a glance
+   without repainting the Gantt itself. */
+.wx-row.is-search-hidden {
+  display: none !important;
+}
+.wx-row.is-search-match {
+  background: #fffbeb !important;
+  box-shadow: inset 3px 0 0 0 #f59e0b;
+}
+.wx-bar.is-search-match {
+  filter: drop-shadow(0 0 0 rgba(245, 158, 11, 0)) drop-shadow(0 0 6px rgba(245, 158, 11, 0.55));
+}
+
 .gantt-frame {
   position: relative;
   height: calc(100vh - 230px);

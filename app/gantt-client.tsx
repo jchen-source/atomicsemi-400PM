@@ -1839,6 +1839,52 @@ export default function GanttClient({
         /* ignore */
       });
     });
+
+    // Double-clicking a bar normally asks SVAR to open its built-in side
+    // editor. We intercept that action, cancel it, and open our own
+    // quick-edit popover anchored to the bar so the user stays inside
+    // the chart. Intercept returns false to cancel the default.
+    const openQuickEditorFor = (id: string) => {
+      const root = frameRef.current;
+      const barEl = root?.querySelector<HTMLElement>(
+        `[data-bar-id="${CSS.escape(id)}"]`,
+      );
+      const POPOVER_W = 320;
+      let anchor = { top: 120, left: 120, width: POPOVER_W };
+      if (barEl) {
+        const rect = barEl.getBoundingClientRect();
+        const left = Math.max(
+          12,
+          Math.min(
+            window.innerWidth - POPOVER_W - 12,
+            rect.left + rect.width / 2 - POPOVER_W / 2,
+          ),
+        );
+        const top =
+          rect.bottom + 8 + 360 > window.innerHeight
+            ? Math.max(12, rect.top - 8 - 360)
+            : rect.bottom + 8;
+        anchor = { top, left, width: POPOVER_W };
+      }
+      setBarEditor({ taskId: id, anchor });
+    };
+
+    const interceptEditor = (raw: unknown) => {
+      const data = raw as { id?: string | number };
+      if (data?.id == null) return false;
+      openQuickEditorFor(String(data.id));
+      return false;
+    };
+    try {
+      api.intercept("show-editor", interceptEditor);
+    } catch {
+      /* older SVAR versions may not expose this action */
+    }
+    try {
+      api.intercept("open-editor", interceptEditor);
+    } catch {
+      /* noop */
+    }
   }
 
   const Theme = dark ? WillowDark : Willow;

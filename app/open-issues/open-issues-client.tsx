@@ -50,6 +50,16 @@ export default function OpenIssuesClient({
 }) {
   const [rows, setRows] = useState(issues);
   const [commentRows, setCommentRows] = useState(comments);
+  // Top-level catalog split: "open" = anything not yet resolved, "resolved"
+  // = the DONE archive. Resolved items stay accessible for reference but
+  // don't clutter the active catalog.
+  const [tab, setTab] = useState<"open" | "resolved">("open");
+  // Secondary filter that narrows the Open tab to a specific in-flight
+  // status (Open, In Progress, Blocked) or shows all active items.
+  const [statusFilter, setStatusFilter] = useState<
+    "ALL" | "TODO" | "IN_PROGRESS" | "BLOCKED"
+  >("ALL");
+  const [urgencyFilter, setUrgencyFilter] = useState<"ALL" | Urgency>("ALL");
   const [createTitle, setCreateTitle] = useState("");
   const [createOwner, setCreateOwner] = useState("");
   const [createExpectedDate, setCreateExpectedDate] = useState(
@@ -62,6 +72,32 @@ export default function OpenIssuesClient({
     Record<string, string>
   >({});
   const byId = useMemo(() => new Map(linkTargets.map((t) => [t.id, t])), [linkTargets]);
+
+  // Counts drive the tab badges and the per-status dropdown labels.
+  const counts = useMemo(() => {
+    const c = { open: 0, resolved: 0, todo: 0, inProgress: 0, blocked: 0 };
+    for (const r of rows) {
+      if (r.status === "DONE") c.resolved += 1;
+      else c.open += 1;
+      if (r.status === "TODO") c.todo += 1;
+      if (r.status === "IN_PROGRESS") c.inProgress += 1;
+      if (r.status === "BLOCKED") c.blocked += 1;
+    }
+    return c;
+  }, [rows]);
+
+  const filteredRows = useMemo(() => {
+    return rows
+      .filter((r) =>
+        tab === "resolved" ? r.status === "DONE" : r.status !== "DONE",
+      )
+      .filter((r) => {
+        if (tab !== "open") return true;
+        if (statusFilter === "ALL") return true;
+        return r.status === statusFilter;
+      })
+      .filter((r) => urgencyFilter === "ALL" || r.urgency === urgencyFilter);
+  }, [rows, tab, statusFilter, urgencyFilter]);
   const commentsByIssueId = useMemo(() => {
     const map = new Map<string, OpenIssueComment[]>();
     for (const c of commentRows) {
@@ -231,14 +267,97 @@ export default function OpenIssuesClient({
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-semibold">Open Issues</h1>
-        <p className="text-sm text-muted-foreground">
-          Track blockers and risks linked to a task or subtask. Open issues are
-          saved as `ISSUE` items and appear on the Gantt board.
-        </p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-semibold">Open Issues</h1>
+          <p className="text-sm text-muted-foreground">
+            Track blockers and risks linked to a task or subtask. Open issues are
+            saved as `ISSUE` items and appear on the Gantt board.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="rounded-lg bg-slate-100 p-1 text-sm font-medium flex gap-1">
+            <button
+              type="button"
+              className={`rounded-md px-3 py-1.5 transition ${
+                tab === "open"
+                  ? "bg-white text-slate-900 shadow-sm"
+                  : "text-slate-600 hover:text-slate-900"
+              }`}
+              onClick={() => setTab("open")}
+            >
+              Open
+              <span
+                className={`ml-2 inline-flex min-w-[22px] justify-center rounded-full px-1.5 py-0.5 text-xs font-semibold ${
+                  tab === "open"
+                    ? "bg-blue-600 text-white"
+                    : "bg-slate-200 text-slate-700"
+                }`}
+              >
+                {counts.open}
+              </span>
+            </button>
+            <button
+              type="button"
+              className={`rounded-md px-3 py-1.5 transition ${
+                tab === "resolved"
+                  ? "bg-white text-slate-900 shadow-sm"
+                  : "text-slate-600 hover:text-slate-900"
+              }`}
+              onClick={() => setTab("resolved")}
+            >
+              Resolved
+              <span
+                className={`ml-2 inline-flex min-w-[22px] justify-center rounded-full px-1.5 py-0.5 text-xs font-semibold ${
+                  tab === "resolved"
+                    ? "bg-emerald-600 text-white"
+                    : "bg-slate-200 text-slate-700"
+                }`}
+              >
+                {counts.resolved}
+              </span>
+            </button>
+          </div>
+        </div>
       </div>
 
+      {tab === "open" && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-white/60 px-3 py-2">
+          <span className="text-xs uppercase tracking-wide text-slate-500">
+            Filter
+          </span>
+          <select
+            className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+            value={statusFilter}
+            onChange={(e) =>
+              setStatusFilter(
+                e.target.value as "ALL" | "TODO" | "IN_PROGRESS" | "BLOCKED",
+              )
+            }
+          >
+            <option value="ALL">All active ({counts.open})</option>
+            <option value="TODO">Open ({counts.todo})</option>
+            <option value="IN_PROGRESS">In Progress ({counts.inProgress})</option>
+            <option value="BLOCKED">Blocked ({counts.blocked})</option>
+          </select>
+          <select
+            className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+            value={urgencyFilter}
+            onChange={(e) => setUrgencyFilter(e.target.value as "ALL" | Urgency)}
+          >
+            <option value="ALL">All urgencies</option>
+            <option value="high">High urgency</option>
+            <option value="medium">Medium urgency</option>
+            <option value="low">Low urgency</option>
+          </select>
+          <span className="ml-auto text-xs text-slate-500">
+            Showing {filteredRows.length} of {counts.open} open issue
+            {counts.open === 1 ? "" : "s"}
+          </span>
+        </div>
+      )}
+
+      {tab === "open" && (
       <div className="rounded-md border border-border bg-muted/20 p-3">
         <div className="mb-2 text-sm font-medium">Create Open Issue</div>
         <div className="grid gap-2 md:grid-cols-6">
@@ -290,6 +409,11 @@ export default function OpenIssuesClient({
         </div>
         {status ? <p className="mt-2 text-xs text-muted-foreground">{status}</p> : null}
       </div>
+      )}
+
+      {tab === "resolved" && status && (
+        <p className="text-xs text-muted-foreground">{status}</p>
+      )}
 
       <div className="overflow-auto rounded-md border border-border">
         <table className="min-w-[1050px] text-sm">
@@ -309,7 +433,21 @@ export default function OpenIssuesClient({
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {filteredRows.length === 0 && (
+              <tr>
+                <td
+                  colSpan={11}
+                  className="px-4 py-8 text-center text-sm text-slate-500"
+                >
+                  {tab === "resolved"
+                    ? "No resolved issues yet."
+                    : counts.open === 0
+                      ? "No open issues. Create one above or mark a task as an issue from the Gantt."
+                      : "No issues match the current filters."}
+                </td>
+              </tr>
+            )}
+            {filteredRows.map((r) => (
               <tr
                 key={r.id}
                 className={`border-t border-border ${urgencyRowClass(r.urgency)}`}
@@ -466,12 +604,28 @@ export default function OpenIssuesClient({
                   </div>
                 </Td>
                 <Td>
-                  <button
-                    className="rounded border border-border bg-background px-2 py-1 text-xs hover:bg-muted"
-                    onClick={() => patchIssue(r.id, { status: "DONE", progress: 100 })}
-                  >
-                    Mark Resolved
-                  </button>
+                  {r.status === "DONE" ? (
+                    <button
+                      className="rounded border border-border bg-background px-2 py-1 text-xs hover:bg-muted"
+                      onClick={() =>
+                        patchIssue(r.id, {
+                          status: "IN_PROGRESS",
+                          progress: r.progress === 100 ? 0 : r.progress,
+                        })
+                      }
+                    >
+                      Reopen
+                    </button>
+                  ) : (
+                    <button
+                      className="rounded border border-border bg-background px-2 py-1 text-xs hover:bg-muted"
+                      onClick={() =>
+                        patchIssue(r.id, { status: "DONE", progress: 100 })
+                      }
+                    >
+                      Mark Resolved
+                    </button>
+                  )}
                 </Td>
               </tr>
             ))}

@@ -5252,19 +5252,21 @@ function TodayOverlay({
   const placement = useMemo(() => {
     const frame = frameRef.current;
     if (!frame) return null;
-    // Chart area so we only paint over the timeline (not the table).
-    // SVAR renders the bars inside `.wx-area`; fall back to `.wx-chart`
-    // for older builds.
-    const area = (frame.querySelector(".wx-area") ??
-      frame.querySelector(".wx-chart")) as HTMLElement | null;
-    if (!area) return null;
 
     // Anchor to the widest rendered bar we can find, so pixels-per-ms
-    // is as precise as possible. Skip unplaced ghosts (0 width).
+    // is as precise as possible. Skip unplaced ghosts (0 width). We
+    // also derive the "area" (positioning reference) by walking up
+    // from a bar to its nearest `.wx-area` ancestor — this is the
+    // content-width container the bars actually live in, which is
+    // different from the viewport-width wrapper SVAR also renders as
+    // `.wx-area`. Using the inner one means `left: x` lives in the
+    // same coordinate system the bars use, so the line scrolls with
+    // the timeline instead of being clipped to the visible viewport.
     let anchorEl: HTMLElement | null = null;
     let anchorStart = 0;
     let anchorEnd = 0;
     let bestWidth = 0;
+    let area: HTMLElement | null = null;
     const byId = new Map(tasks.map((t) => [t.id, t] as const));
     const bars = frame.querySelectorAll<HTMLElement>("[data-bar-id]");
     for (const el of Array.from(bars)) {
@@ -5281,29 +5283,41 @@ function TodayOverlay({
       anchorEl = el;
       anchorStart = s;
       anchorEnd = e;
+      const a = el.closest(".wx-area") as HTMLElement | null;
+      if (a) area = a;
     }
-    if (!anchorEl) return null;
+    if (!anchorEl || !area) {
+      // Fallback: no bars yet (empty state / still rendering). Pick
+      // the inner `.wx-area` inside `.wx-chart` if present, so at
+      // least the node resolution is correct when bars do appear.
+      area =
+        (frame.querySelector(".wx-chart .wx-area") as HTMLElement | null) ??
+        (frame.querySelector(".wx-area") as HTMLElement | null);
+      if (!anchorEl || !area) return null;
+    }
 
-    // Positioning reference is the chart area itself so our "x" lives
-    // in the same content coordinate system that the area occupies.
-    // That way, when the user scrolls the frame horizontally, we
-    // redraw relative to the same origin and the line stays pinned
-    // to today's date visually.
+    // `.wx-area` is *inside* the horizontally-scrolling `.wx-chart`
+    // but is not itself scrollable — its rendered box is the full
+    // content width. That means `aRect.left - areaRect.left` is the
+    // anchor's offset in content coordinates and stays constant
+    // across scroll, so our computed x also lives in content coords.
+    // `areaRect.width` is the full timeline width (not viewport),
+    // so the bounds check only hides when today is outside the
+    // entire chart — which dateRange explicitly pads to include.
     const areaRect = area.getBoundingClientRect();
     const aRect = anchorEl.getBoundingClientRect();
     const msPerPx = (anchorEnd - anchorStart) / aRect.width;
     if (!Number.isFinite(msPerPx) || msPerPx <= 0) return null;
-    // Anchor's left edge expressed in area-relative pixels:
     const anchorLeftInArea = aRect.left - areaRect.left;
     const todayMs = Date.now();
     const xInArea = anchorLeftInArea + (todayMs - anchorStart) / msPerPx;
 
-    // Hide if today is outside the full timeline (clamp by a few px).
-    if (xInArea < -2 || xInArea > areaRect.width + 2) return null;
+    const contentWidth = Math.max(areaRect.width, area.scrollWidth || 0);
+    if (xInArea < -2 || xInArea > contentWidth + 2) return null;
 
     return {
       xInArea,
-      areaHeight: area.offsetHeight || areaRect.height,
+      areaHeight: area.scrollHeight || area.offsetHeight || areaRect.height,
       areaEl: area,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

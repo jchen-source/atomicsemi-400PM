@@ -550,14 +550,59 @@
    on both `.wx-table-container` and `.wx-chart`, which gave each pane
    its own independent scrollbar — and because the browser's scroll
    event doesn't bubble, SVAR's sync handler never fired. The two panes
-   drifted out of alignment as the user scrolled. Only horizontal
-   overflow needs a nudge here (timeline width can exceed viewport). */
+   drifted out of alignment as the user scrolled. */
+
+/* Table pane: NO horizontal scroll of its own. The sum of column
+   widths often exceeds the default pane width, but we'd rather clip
+   the extra columns (and nudge users to drag the splitter if they
+   want more of a table view) than paint a second horizontal scrollbar
+   alongside the timeline's. Clipping instead of scrolling gives the
+   whole Gantt a single, predictable horizontal scrollbar. */
 .gantt-frame [class*="wx-table-container"] {
-  overflow-x: auto !important;
+  overflow-x: hidden !important;
+  position: relative;
 }
 
 .gantt-frame [class*="wx-chart"] {
   overflow-x: auto !important;
+}
+
+/* Fade the right edge of the clipped table so users get a visual
+   hint that more columns exist past the splitter — pair with the
+   resizer affordance below. */
+.gantt-frame [class*="wx-table-container"]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 24px;
+  pointer-events: none;
+  background: linear-gradient(
+    to right,
+    rgba(255, 255, 255, 0),
+    rgba(255, 255, 255, 0.85)
+  );
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.gantt-frame [class*="wx-table-container"]:hover::after {
+  opacity: 1;
+}
+
+/* Table ↔ chart splitter: SVAR renders a thin `.wx-resizer` between
+   the two panes. By default it's easy to miss, and because we now
+   clip the table's own horizontal scrollbar (above), discoverability
+   of the splitter matters more: dragging it rightwards is how users
+   reveal the clipped columns. We bump the hit area slightly, give
+   it a column-resize cursor, and tint it on hover so it reads as an
+   interactive divider. */
+.gantt-frame [class*="wx-resizer"] {
+  cursor: col-resize !important;
+  min-width: 6px;
+}
+.gantt-frame [class*="wx-resizer"]:hover {
+  background-color: rgba(99, 102, 241, 0.45) !important;
 }
 
 /* "Hide table" mode: collapses SVAR's left pane so the timeline spans
@@ -565,6 +610,12 @@
    re-init SVAR and lose scroll position / opened rows) — we just clip
    the left pane to zero width and let the chart flex-grow to fill. */
 .gantt-frame--chart-only [class*="wx-table-container"] {
+  display: none !important;
+}
+.gantt-frame--chart-only [class*="wx-table-container"]::after {
+  display: none;
+}
+.gantt-frame--chart-only [class*="wx-resizer"] {
   display: none !important;
 }
 

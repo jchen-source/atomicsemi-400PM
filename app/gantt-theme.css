@@ -409,21 +409,26 @@
   box-shadow: 0 4px 10px rgba(76, 84, 113, 0.14);
 }
 
-/* Dependency drag handles — kept small and nearly hidden at rest so they
-   stop dominating short bars, then reveal at full size on hover/selection
-   for grabbing. Previously these were 14x14 with strong borders, which
-   made every short bar look like two circles glued together. */
+/* Dependency drag handles — persistent UI, not hover-gated. Users kept
+   missing them because they'd vanish whenever the cursor drifted off a
+   bar, and we want dependency linking to feel like an always-available
+   tool. Sized modestly so short bars still read cleanly; they grow
+   slightly and pick up a soft halo on hover so it's obvious they're
+   the grab target. */
 .gantt-frame .wx-link {
-  opacity: 0 !important;
-  width: 9px !important;
-  height: 9px !important;
+  opacity: 1 !important;
+  width: 11px !important;
+  height: 11px !important;
   border-width: 1.5px !important;
   border-color: #8b78e6 !important;
   background: #ffffff !important;
   box-shadow: 0 1px 2px rgba(124, 103, 217, 0.18);
   cursor: crosshair !important;
-  transition: opacity 0.12s ease, transform 0.12s ease,
-    width 0.12s ease, height 0.12s ease;
+  transition:
+    width 0.12s ease,
+    height 0.12s ease,
+    box-shadow 0.12s ease,
+    border-color 0.12s ease;
 }
 
 .gantt-frame .wx-link .wx-inner {
@@ -431,21 +436,31 @@
   height: 4px !important;
   border-width: 1.5px !important;
   border-color: #8b78e6 !important;
+  transition:
+    width 0.12s ease,
+    height 0.12s ease;
 }
 
-.gantt-frame .wx-bar:hover .wx-link {
-  opacity: 1 !important;
-  width: 13px !important;
-  height: 13px !important;
+/* Hover on the bar OR directly on the handle grows it a touch so
+   users have a generous grab target without the handle having to be
+   big by default. */
+.gantt-frame .wx-bar:hover .wx-link,
+.gantt-frame .wx-link:hover {
+  width: 14px !important;
+  height: 14px !important;
+  border-color: #6d58e1 !important;
+  box-shadow: 0 0 0 3px rgba(124, 103, 217, 0.16),
+    0 1px 2px rgba(124, 103, 217, 0.22);
 }
 
-.gantt-frame .wx-bar:hover .wx-link .wx-inner {
+.gantt-frame .wx-bar:hover .wx-link .wx-inner,
+.gantt-frame .wx-link:hover .wx-inner {
   width: 6px !important;
   height: 6px !important;
 }
 
 .gantt-frame .wx-bar.wx-selected .wx-link {
-  opacity: 1 !important;
+  border-color: #6d58e1 !important;
 }
 
 /* Template root. Keeps `.task-pill` cleanly sized to the bar; tooltips

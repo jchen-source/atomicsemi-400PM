@@ -1193,16 +1193,16 @@
   color: #dc2626;
 }
 
-/* Milestone entry gets a gold tint so it's obvious it's the action
+/* Milestone entry gets a red tint so it's obvious it's the action
    that will drop a star on the chart. Icon keeps its fill from the
    inline SVG props. */
 .task-context-item--milestone:hover,
 .task-context-item--milestone:focus-visible {
-  background: rgba(250, 204, 21, 0.18);
+  background: rgba(239, 68, 68, 0.14);
 }
 
 .task-context-item--milestone .task-context-icon {
-  color: #b45309;
+  color: #b91c1c;
 }
 
 .task-context-label {
@@ -1214,7 +1214,7 @@
 
 .task-context-parent {
   font-size: 11.5px;
-  color: #92400e;
+  color: #991b1b;
   font-weight: 600;
   max-width: 260px;
   overflow: hidden;
@@ -2341,7 +2341,7 @@
   position: absolute;
   inset: 0;
   z-index: 1;
-  filter: drop-shadow(0 2px 4px rgba(202, 138, 4, 0.5));
+  filter: drop-shadow(0 2px 4px rgba(190, 18, 60, 0.55));
   transform-origin: center;
   animation: milestone-pulse 1.6s ease-in-out infinite;
 }
@@ -2352,16 +2352,19 @@
   border-radius: 50%;
   background: radial-gradient(
     closest-side,
-    rgba(250, 204, 21, 0.7),
-    rgba(250, 204, 21, 0)
+    rgba(239, 68, 68, 0.7),
+    rgba(239, 68, 68, 0)
   );
   animation: milestone-glow 1.6s ease-in-out infinite;
   pointer-events: none;
 }
 
+/* Default milestone = bright red. "Done" switches to green so completed
+   milestones read differently; "overdue" goes dark red with a faster
+   pulse to flag slip. */
 .milestone-star__glyph {
-  fill: #facc15;
-  stroke: #b45309;
+  fill: #ef4444;
+  stroke: #7f1d1d;
   stroke-width: 0.75;
   stroke-linejoin: round;
   stroke-linecap: round;
@@ -2381,15 +2384,15 @@
 }
 
 .milestone-star--overdue .milestone-star__glyph {
-  fill: #ef4444;
-  stroke: #7f1d1d;
+  fill: #b91c1c;
+  stroke: #450a0a;
 }
 
 .milestone-star--overdue .milestone-star__glow {
   background: radial-gradient(
     closest-side,
-    rgba(239, 68, 68, 0.55),
-    rgba(239, 68, 68, 0)
+    rgba(185, 28, 28, 0.7),
+    rgba(185, 28, 28, 0)
   );
   animation-duration: 0.9s;
 }
@@ -2411,15 +2414,15 @@
     ui-sans-serif,
     system-ui,
     sans-serif;
-  color: #78350f;
+  color: #7f1d1d;
   letter-spacing: 0.01em;
-  background: linear-gradient(180deg, #fffbeb 0%, #fef3c7 100%);
+  background: linear-gradient(180deg, #fff1f2 0%, #fee2e2 100%);
   padding: 3px 9px;
   border-radius: 999px;
-  border: 1px solid rgba(202, 138, 4, 0.55);
+  border: 1px solid rgba(220, 38, 38, 0.55);
   box-shadow:
     0 1px 2px rgba(0, 0, 0, 0.06),
-    0 0 0 2px rgba(250, 204, 21, 0.15);
+    0 0 0 2px rgba(239, 68, 68, 0.18);
   max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2428,25 +2431,31 @@
 
 .milestone-star--done .milestone-star__label {
   color: #14532d;
-  background: rgba(240, 253, 244, 0.95);
-  border-color: rgba(22, 163, 74, 0.4);
+  background: linear-gradient(180deg, #f0fdf4 0%, #dcfce7 100%);
+  border-color: rgba(22, 163, 74, 0.5);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.06),
+    0 0 0 2px rgba(34, 197, 94, 0.18);
 }
 
 .milestone-star--overdue .milestone-star__label {
   color: #7f1d1d;
-  background: rgba(254, 242, 242, 0.95);
-  border-color: rgba(220, 38, 38, 0.45);
+  background: linear-gradient(180deg, #fef2f2 0%, #fecaca 100%);
+  border-color: rgba(185, 28, 28, 0.6);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.08),
+    0 0 0 2px rgba(185, 28, 28, 0.22);
 }
 
 @keyframes milestone-pulse {
   0%,
   100% {
     transform: scale(1);
-    filter: drop-shadow(0 1px 2px rgba(202, 138, 4, 0.35));
+    filter: drop-shadow(0 1px 2px rgba(190, 18, 60, 0.4));
   }
   50% {
     transform: scale(1.18);
-    filter: drop-shadow(0 2px 8px rgba(202, 138, 4, 0.7));
+    filter: drop-shadow(0 2px 10px rgba(239, 68, 68, 0.7));
   }
 }
 
@@ -2467,4 +2476,40 @@
   .milestone-star__glow {
     animation: none;
   }
+}
+
+/* Floating overlay host for attached milestones. Sits on top of the
+   SVAR frame and lets underlying clicks through EXCEPT on the marker
+   itself, which is the click target for rename / delete. */
+.milestone-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6; /* above hierarchy-overlay (5) and SVAR bars */
+}
+
+/* One marker per attached milestone. The marker box is the star's
+   bounding box; we translate by -50%/-50% so (left, top) resolves to
+   the star's visual center instead of its upper-left. The label is
+   absolutely positioned INSIDE the marker (see .milestone-star__label)
+   so it floats to the right of the star without shifting the anchor.
+
+   We explicitly override the .milestone-star base rules (inset: 0,
+   pointer-events: none) because the overlay marker needs its own
+   left/top anchor and needs to receive clicks for rename/delete. */
+.milestone-overlay__marker.milestone-star {
+  position: absolute;
+  inset: auto;
+  width: 34px;
+  height: 34px;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.milestone-overlay__marker:hover .milestone-star__label {
+  transform: translateY(-50%) scale(1.03);
+  box-shadow:
+    0 2px 6px rgba(239, 68, 68, 0.18),
+    0 0 0 2px rgba(239, 68, 68, 0.3);
 }

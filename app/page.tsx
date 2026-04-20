@@ -24,9 +24,22 @@ export default async function GanttPage() {
 
   const hasNotion = notionCount > 0;
   const tasks = orderTasksHierarchy(rawTasks);
+  // Attached milestones live on their parent's row (rendered via
+  // MilestoneOverlay), so they're removed from the SVAR `tasks` feed.
+  // Any dependency whose source or target is one of those ids would
+  // dangle in SVAR — build a deny-set to filter them out below.
+  const attachedMilestoneIds = new Set(
+    tasks
+      .filter((t) => t.type === "MILESTONE" && t.parentId)
+      .map((t) => t.id),
+  );
   const childCountByParent = new Map<string, number>();
   for (const t of tasks) {
     if (t.type === "ISSUE") continue;
+    // Attached milestones are not real rows in the chart (they overlay
+    // the parent), so they shouldn't inflate the parent's "has
+    // children" count and turn a solo parent into a summary row.
+    if (t.type === "MILESTONE" && t.parentId) continue;
     if (!t.parentId) continue;
     childCountByParent.set(
       t.parentId,
@@ -117,8 +130,16 @@ export default async function GanttPage() {
         // NOT render on the roadmap / Gantt surface — the Gantt is for
         // planned work (programs, workstreams, tasks, milestones). Issue
         // counts still surface on their anchor task's name as "[N open]".
+        //
+        // Attached milestones (those with a parent) are ALSO pulled out
+        // of the main task list — they render as overlay stars anchored
+        // to the parent's bar via the `milestones` prop below, so they
+        // share a row with their parent workstream/task instead of
+        // occupying their own line. Standalone milestones (no parent)
+        // still appear as their own row so they remain visible.
         tasks={tasks
           .filter((t) => t.type !== "ISSUE")
+          .filter((t) => !(t.type === "MILESTONE" && t.parentId))
           .map((t) => ({
             id: t.id,
             text: linkedOpenIssuesByTask.get(t.id)?.length
@@ -147,12 +168,27 @@ export default async function GanttPage() {
               ? t.type
               : "TASK") as "EPIC" | "TASK" | "ISSUE" | "MILESTONE",
           }))}
-        links={deps.map((d) => ({
-          id: d.id,
-          source: d.predecessorId,
-          target: d.dependentId,
-          type: depTypeToLinkType(d.type),
-        }))}
+        milestones={tasks
+          .filter((t) => t.type === "MILESTONE" && t.parentId)
+          .map((t) => ({
+            id: t.id,
+            title: t.title,
+            date: t.endDate.toISOString(),
+            parentId: t.parentId as string,
+            progress: t.progress,
+          }))}
+        links={deps
+          .filter(
+            (d) =>
+              !attachedMilestoneIds.has(d.predecessorId) &&
+              !attachedMilestoneIds.has(d.dependentId),
+          )
+          .map((d) => ({
+            id: d.id,
+            source: d.predecessorId,
+            target: d.dependentId,
+            type: depTypeToLinkType(d.type),
+          }))}
         emptyState={
           tasks.length === 0 ? (
             <div className="roadmap-empty">

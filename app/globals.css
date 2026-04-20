@@ -464,9 +464,20 @@ body {
   color: #64748b;
 }
 
+/* Self-contained scroll region: both axes scroll INSIDE the matrix
+   instead of piggy-backing on the page, so the sticky thead / sticky
+   col-name can actually stick. We cap the height so the table never
+   pushes the rest of the page off-screen on laptops. `overscroll-
+   behavior: contain` stops vertical overscroll from bleeding into the
+   page when the user rolls past the end. */
 .people-matrix-scroll {
-  overflow-x: auto;
+  overflow: auto;
+  max-height: min(640px, calc(100vh - 260px));
   border-radius: 8px;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  background: #ffffff;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .people-matrix-table {
@@ -485,6 +496,9 @@ body {
   vertical-align: middle;
 }
 
+/* thead rides above both the tbody and the left sticky column. The
+   intersection cell (thead .col-name) needs the highest z-index so it
+   doesn't get painted over by either sticky neighbor during scroll. */
 .people-matrix-table thead th {
   position: sticky;
   top: 0;
@@ -495,6 +509,8 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   padding: 10px;
+  z-index: 3;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.08);
 }
 
 .people-matrix-table .col-name {
@@ -503,13 +519,23 @@ body {
   position: sticky;
   left: 0;
   background: white;
-  z-index: 1;
+  z-index: 2;
   border-right: 1px solid rgba(15, 23, 42, 0.06);
 }
 
 .people-matrix-table thead .col-name,
 .people-matrix-table tfoot .col-name {
   background: #f8fafc;
+  /* Sits at the corner where thead-sticky and col-sticky meet — needs
+     to beat both so the label doesn't flicker through neighbor cells
+     while scrolling. */
+  z-index: 4;
+}
+
+.people-matrix-table tfoot th {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
 }
 
 .people-matrix-table .col-week {

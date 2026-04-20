@@ -194,13 +194,26 @@ const ZOOM_SCALES: Record<
   ],
 };
 
+export type AttachedMilestone = {
+  id: string;
+  title: string;
+  /** ISO string — usually equals the parent's endDate. */
+  date: string;
+  /** Parent task id this milestone is anchored to. */
+  parentId: string;
+  /** 0-100. When 100 the star renders "done" (green). */
+  progress?: number;
+};
+
 export default function GanttClient({
   tasks,
   links,
+  milestones = [],
   emptyState,
 }: {
   tasks: GanttTaskInput[];
   links: GanttLinkInput[];
+  milestones?: AttachedMilestone[];
   emptyState?: React.ReactNode;
 }) {
   const router = useRouter();
@@ -3576,6 +3589,92 @@ export default function GanttClient({
         {tasks.length > 0 ? (
           <HierarchyOverlay tasks={tasks} frameRef={frameRef} />
         ) : null}
+        {milestones.length > 0 ? (
+          <MilestoneOverlay
+            milestones={milestones}
+            tasks={tasks}
+            frameRef={frameRef}
+            onDelete={async (id, title) => {
+              if (
+                !window.confirm(
+                  `Delete milestone "${title}"? This can be undone with ⌘Z.`,
+                )
+              )
+                return;
+              // Snapshot for undo before we nuke it.
+              const snap = milestones.find((m) => m.id === id);
+              try {
+                await fetch(`/api/tasks/${id}?mode=cascade`, {
+                  method: "DELETE",
+                });
+                setStatus("Milestone deleted.");
+                router.refresh();
+                setTimeout(() => setStatus(""), 1000);
+                if (snap) {
+                  pushUndo({
+                    label: `delete milestone ${snap.title}`,
+                    run: async () => {
+                      await fetch("/api/tasks", {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({
+                          title: snap.title,
+                          description: "",
+                          type: "MILESTONE",
+                          status: "TODO",
+                          parentId: snap.parentId,
+                          startDate: snap.date,
+                          endDate: snap.date,
+                          progress: snap.progress ?? 0,
+                          sortOrder: 9999,
+                          tags: [],
+                        }),
+                      });
+                      router.refresh();
+                    },
+                  });
+                }
+              } catch (err) {
+                setStatus(
+                  err instanceof Error
+                    ? `Delete failed: ${err.message}`
+                    : "Delete failed",
+                );
+              }
+            }}
+            onRename={async (id, oldTitle) => {
+              const next = window.prompt("Milestone name", oldTitle);
+              if (next === null) return;
+              const title = next.trim();
+              if (!title || title === oldTitle) return;
+              try {
+                await fetch(`/api/tasks/${id}`, {
+                  method: "PATCH",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ title }),
+                });
+                router.refresh();
+                pushUndo({
+                  label: `rename milestone`,
+                  run: async () => {
+                    await fetch(`/api/tasks/${id}`, {
+                      method: "PATCH",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({ title: oldTitle }),
+                    });
+                    router.refresh();
+                  },
+                });
+              } catch (err) {
+                setStatus(
+                  err instanceof Error
+                    ? `Rename failed: ${err.message}`
+                    : "Rename failed",
+                );
+              }
+            }}
+          />
+        ) : null}
       </div>
       {depEditorTaskId && (
         <DepsPicker
@@ -3778,8 +3877,8 @@ export default function GanttClient({
                       viewBox="0 0 24 24"
                       width="14"
                       height="14"
-                      fill="#facc15"
-                      stroke="#b45309"
+                      fill="#ef4444"
+                      stroke="#7f1d1d"
                       strokeWidth="0.6"
                       strokeLinejoin="round"
                     >
@@ -4384,6 +4483,190 @@ function HierarchyOverlay({
       <path className="hierarchy-overlay__spine" d={segments.spines.join(" ")} />
       <path className="hierarchy-overlay__stub" d={segments.stubs.join(" ")} />
     </svg>
+  );
+}
+
+/**
+ * Floating overlay that paints a milestone star on its PARENT's row
+ * instead of occupying a dedicated SVAR row. Works exactly like
+ * HierarchyOverlay (DOM-driven, coalesced by MutationObserver /
+ * ResizeObserver / scroll), but places a star + label pill at the
+ * milestone's date along the parent bar.
+ *
+ * Coordinate logic: we use the parent's bar DOM rect as our only
+ * reference. The milestone's X along the parent bar is the linear
+ * interpolation of its date between parent.start and parent.end. This
+ * means we don't have to read SVAR's internal time scale — we just
+ * ride the parent's rendered geometry, which is already correct at
+ * every zoom level and after every drag.
+ */
+function MilestoneOverlay({
+  milestones,
+  tasks,
+  frameRef,
+  onDelete,
+  onRename,
+}: {
+  milestones: AttachedMilestone[];
+  tasks: GanttTaskInput[];
+  frameRef: React.RefObject<HTMLDivElement | null>;
+  onDelete: (id: string, title: string) => void;
+  onRename: (id: string, title: string) => void;
+}) {
+  const [tick, setTick] = useState(0);
+
+  useLayoutEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+
+    let raf = 0;
+    const schedule = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        setTick((t) => t + 1);
+      });
+    };
+
+    const ro = new ResizeObserver(schedule);
+    ro.observe(frame);
+
+    const mo = new MutationObserver(schedule);
+    mo.observe(frame, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style", "class", "transform"],
+      childList: true,
+    });
+
+    const onScroll = () => schedule();
+    frame.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", schedule);
+
+    schedule();
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      mo.disconnect();
+      frame.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", schedule);
+    };
+  }, [frameRef]);
+
+  const parentRangeById = useMemo(() => {
+    const m = new Map<string, { start: number; end: number }>();
+    for (const t of tasks) {
+      m.set(t.id, {
+        start: new Date(t.start).getTime(),
+        end: new Date(t.end).getTime(),
+      });
+    }
+    return m;
+  }, [tasks]);
+
+  const now = Date.now();
+  const items = useMemo(() => {
+    const frame = frameRef.current;
+    if (!frame) return [] as Array<{
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      done: boolean;
+      overdue: boolean;
+    }>;
+    const frameRect = frame.getBoundingClientRect();
+    const out: Array<{
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      done: boolean;
+      overdue: boolean;
+    }> = [];
+    for (const m of milestones) {
+      const parentEl = frame.querySelector(
+        `[data-bar-id="${CSS.escape(m.parentId)}"]`,
+      ) as HTMLElement | null;
+      if (!parentEl) continue;
+      const pRect = parentEl.getBoundingClientRect();
+      // Ignore parents that aren't currently rendered (virtualized out
+      // of view) — their rect collapses to zero and would place the
+      // star at 0,0.
+      if (pRect.width < 1 || pRect.height < 1) continue;
+      const range = parentRangeById.get(m.parentId);
+      const mDate = new Date(m.date).getTime();
+      let frac = 1; // default to right edge if we can't compute
+      if (range && range.end > range.start) {
+        frac = (mDate - range.start) / (range.end - range.start);
+      }
+      frac = Math.max(0, Math.min(1, frac));
+      const x = pRect.left - frameRect.left + frac * pRect.width;
+      // Row center is more reliable than the bar center when SVAR is
+      // showing a summary bar at a different height.
+      const rowEl = parentEl.closest(".wx-row") as HTMLElement | null;
+      const rowRect = rowEl?.getBoundingClientRect() ?? pRect;
+      const y = rowRect.top - frameRect.top + rowRect.height / 2;
+      const done = (m.progress ?? 0) >= 100;
+      const overdue = !done && mDate < now;
+      out.push({ id: m.id, title: m.title, x, y, done, overdue });
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, milestones, parentRangeById]);
+
+  if (items.length === 0) return null;
+
+  return (
+    <div className="milestone-overlay" aria-hidden="false">
+      {items.map((m) => {
+        const stateClass =
+          (m.done
+            ? " milestone-star--done"
+            : " milestone-star--open") +
+          (m.overdue ? " milestone-star--overdue" : "");
+        return (
+          <div
+            key={m.id}
+            className={
+              "milestone-overlay__marker milestone-star" + stateClass
+            }
+            style={{ left: m.x, top: m.y }}
+            title={`Milestone: ${m.title} — click to rename, shift-click to delete`}
+            data-milestone-id={m.id}
+            onClick={(e) => {
+              if (e.shiftKey) {
+                onDelete(m.id, m.title);
+              } else {
+                onRename(m.id, m.title);
+              }
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              onDelete(m.id, m.title);
+            }}
+          >
+            <span className="milestone-star__core" aria-hidden="true">
+              <span className="milestone-star__glow" />
+              <svg
+                viewBox="0 0 24 24"
+                width="34"
+                height="34"
+                aria-hidden="true"
+                focusable="false"
+                className="milestone-star__svg"
+              >
+                <path
+                  d="M12 1 Q12.55 11.45 23 12 Q12.55 12.55 12 23 Q11.45 12.55 1 12 Q11.45 11.45 12 1 Z"
+                  className="milestone-star__glyph"
+                />
+              </svg>
+            </span>
+            <span className="milestone-star__label">{m.title}</span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

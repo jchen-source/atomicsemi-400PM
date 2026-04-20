@@ -29,7 +29,7 @@ export default function RootLayout({
                 Main Menu
               </p>
               <nav className="space-y-1 text-sm">
-                <SideLink href="/" label="Gantt Board" />
+                <SideLink href="/" label="Gantt Chart" />
                 <SideLink href="/issues" label="Table View" />
                 <SideLink href="/open-issues" label="Open Issues" />
                 <SideLink href="/burndown" label="Burndown" />

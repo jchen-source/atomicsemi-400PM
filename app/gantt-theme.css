@@ -229,11 +229,15 @@
 .gantt-frame .wx-header {
   background: #f8fafc !important;
   border-color: rgb(var(--border)) !important;
-  color: #0f172a !important;
-  font-weight: 600 !important;
-  font-size: 11px !important;
-  letter-spacing: 0.04em !important;
-  text-transform: uppercase !important;
+  color: rgb(var(--muted-fg)) !important;
+  /* Match Task / Start / End / Depends-on body typography so headers and
+     cells share one font family. Sentence-case, tabular, no tracking. */
+  font-family: inherit !important;
+  font-weight: 500 !important;
+  font-size: 12px !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+  font-variant-numeric: tabular-nums !important;
 }
 
 .gantt-frame .wx-bar {

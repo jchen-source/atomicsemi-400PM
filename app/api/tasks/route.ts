@@ -6,8 +6,10 @@ import { parseTags, serializeTags } from "@/lib/utils";
 import { rollupFromParentId } from "@/lib/schedule";
 
 export async function GET() {
+  // Stable ordering — no startDate tiebreaker — so repeated calls return
+  // rows in the same order even as users edit dates.
   const tasks = await prisma.task.findMany({
-    orderBy: [{ parentId: "asc" }, { sortOrder: "asc" }, { startDate: "asc" }],
+    orderBy: [{ parentId: "asc" }, { sortOrder: "asc" }, { id: "asc" }],
   });
   return NextResponse.json(
     tasks.map((t) => ({ ...t, tags: parseTags(t.tags) })),

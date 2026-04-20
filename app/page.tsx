@@ -10,10 +10,12 @@ export const dynamic = "force-dynamic";
 export default async function GanttPage() {
   const [rawTasks, deps, notionCount, latestSync] = await Promise.all([
     prisma.task.findMany({
-      orderBy: [
-        { sortOrder: "asc" },
-        { startDate: "asc" },
-      ],
+      // Order by sortOrder then id. We deliberately do NOT tie-break on
+      // startDate — doing so caused rows to reshuffle in the left table
+      // every time a user edited a date, which the user (rightly) flagged
+      // as "things shifting around". `id` gives a stable, user-invisible
+      // secondary so the list only moves when the user actually reorders.
+      orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
     }),
     prisma.dependency.findMany(),
     prisma.task.count({ where: { notionId: { not: null } } }),
@@ -200,7 +202,7 @@ function urgencyFromTags(tags: string[]): "high" | "medium" | "low" {
 }
 
 function orderTasksHierarchy<
-  T extends { id: string; parentId: string | null; sortOrder: number; startDate: Date },
+  T extends { id: string; parentId: string | null; sortOrder: number },
 >(rows: T[]): T[] {
   const byParent = new Map<string | null, T[]>();
   for (const r of rows) {
@@ -209,10 +211,13 @@ function orderTasksHierarchy<
     byParent.set(r.parentId, arr);
   }
   for (const [, arr] of byParent) {
+    // Stable-ish secondary sort by id (not startDate) so that changing a
+    // task's dates never reorders its siblings. Reparenting / explicit
+    // drag-reorder remains the only thing that moves rows.
     arr.sort(
       (a, b) =>
         a.sortOrder - b.sortOrder ||
-        a.startDate.getTime() - b.startDate.getTime(),
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
     );
   }
   const out: T[] = [];

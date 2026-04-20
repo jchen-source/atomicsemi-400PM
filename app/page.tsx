@@ -140,15 +140,18 @@ export default async function GanttPage() {
           parent: t.type === "ISSUE" ? null : t.parentId,
           open: t.type === "ISSUE" ? undefined : (childCountByParent.get(t.id) ?? 0) > 0,
           type:
-            t.type === "ISSUE"
-              ? "task"
-              : (childCountByParent.get(t.id) ?? 0) > 0 || t.type === "EPIC"
-                ? "summary"
-                : "task",
-          rowType: (t.type === "EPIC" || t.type === "ISSUE" ? t.type : "TASK") as
-            | "EPIC"
-            | "TASK"
-            | "ISSUE",
+            t.type === "MILESTONE"
+              ? "milestone"
+              : t.type === "ISSUE"
+                ? "task"
+                : (childCountByParent.get(t.id) ?? 0) > 0 || t.type === "EPIC"
+                  ? "summary"
+                  : "task",
+          rowType: (t.type === "EPIC" ||
+          t.type === "ISSUE" ||
+          t.type === "MILESTONE"
+            ? t.type
+            : "TASK") as "EPIC" | "TASK" | "ISSUE" | "MILESTONE",
         }))}
         links={deps.map((d) => ({
           id: d.id,

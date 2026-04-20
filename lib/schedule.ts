@@ -123,7 +123,13 @@ export async function rollupProgress(
     // Only real work items (TASK / EPIC) define the parent's visible span.
     // Linked ISSUEs render as their own top-level rows in the Gantt, so they
     // must not inflate (or prevent shrinkage of) their anchor task's parent.
-    const spanSiblings = siblings.filter((s) => s.type !== "ISSUE");
+    // MILESTONEs are status markers anchored to the parent's end date — they
+    // must not participate in span or progress rollup (a milestone being
+    // "done" shouldn't mark the whole parent done; a milestone being past
+    // the parent end shouldn't extend the parent).
+    const spanSiblings = siblings.filter(
+      (s) => s.type !== "ISSUE" && s.type !== "MILESTONE",
+    );
 
     let totalWeight = 0;
     let weightedSum = 0;

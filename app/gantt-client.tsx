@@ -34,7 +34,7 @@ export type GanttTaskInput = {
   parent: string | null;
   open?: boolean;
   type: "summary" | "task" | "milestone";
-  rowType: "EPIC" | "TASK" | "ISSUE";
+  rowType: "EPIC" | "TASK" | "ISSUE" | "MILESTONE";
   urgency?: "high" | "medium" | "low";
   effortHours?: number | null;
   assignee?: string | null;
@@ -584,6 +584,18 @@ export default function GanttClient({
     childCountByIdRef.current = childCountById;
   }, [childCountById]);
 
+  // Row type (EPIC / TASK / ISSUE / MILESTONE) by id. The bar template
+  // needs this to switch to the milestone (star) renderer, and it reads
+  // it via a ref so every task edit doesn't invalidate TaskTemplate.
+  const rowTypeByIdRef = useRef<
+    Map<string, "EPIC" | "TASK" | "ISSUE" | "MILESTONE">
+  >(new Map());
+  useEffect(() => {
+    const m = new Map<string, "EPIC" | "TASK" | "ISSUE" | "MILESTONE">();
+    for (const t of tasks) m.set(t.id, t.rowType);
+    rowTypeByIdRef.current = m;
+  }, [tasks]);
+
   // Same trick for depth. Previously TaskNameCell closed over `depthById`
   // directly which meant every task change re-created the cell component,
   // which re-created the `columns` array, which forced SVAR to fully
@@ -642,6 +654,23 @@ export default function GanttClient({
     const pct = Math.max(0, Math.min(100, Number(data?.progress ?? 0)));
     const overdue = data?.end ? isOverdue(data.end, pct) : false;
     const childCount = childCountByIdRef.current.get(id) ?? 0;
+    const rowType = rowTypeByIdRef.current.get(id);
+
+    // Milestones are anchored points on the timeline — not bars. Render
+    // a flashing golden star (see .milestone-star keyframes) centered
+    // on the milestone's date. `overflow: visible` in CSS lets the star
+    // bleed past SVAR's zero-width milestone bar so it's clearly visible.
+    if (rowType === "MILESTONE") {
+      return (
+        <MilestoneBar
+          id={id}
+          label={data?.text ?? ""}
+          done={pct >= 100}
+          overdue={overdue}
+        />
+      );
+    }
+
     // Color by hierarchy LEVEL, not "has children". Previously a
     // workstream with no children rendered as a leaf (urgency-colored),
     // so workstreams and tasks looked identical. Now programs + workstreams
@@ -2188,6 +2217,77 @@ export default function GanttClient({
     }
   }
 
+  /**
+   * Create a milestone attached to the end of a parent task (typically a
+   * workstream). The milestone's start = end = parent.endDate, so it
+   * snaps to the parent's finish line on the Gantt chart. Default title
+   * is the parent's name + "complete" — the user can rename it in the
+   * grid. Works even when no parent is given (floats at "today" as a
+   * free-standing milestone that can be dragged to snap onto a parent).
+   */
+  async function createMilestone(parentId: string | null) {
+    if (addingTask) return;
+    setAddingTask(true);
+    setStatus(
+      parentId
+        ? `Adding milestone at end of ${
+            tasks.find((t) => t.id === parentId)?.text ?? "parent"
+          }…`
+        : "Adding milestone…",
+    );
+    try {
+      const parent = parentId ? tasks.find((t) => t.id === parentId) : null;
+      const anchor = parent ? new Date(parent.end) : new Date();
+      // Milestones are zero-duration: startDate === endDate. The backend
+      // rollup already excludes MILESTONE from the parent's span, so
+      // putting them on the parent's end date won't push the parent out.
+      const date = new Date(anchor);
+      date.setHours(12, 0, 0, 0);
+      const title = parent ? `${parent.text} complete` : "New milestone";
+      const res = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title,
+          description: "",
+          type: "MILESTONE",
+          status: "TODO",
+          parentId: parentId ?? undefined,
+          startDate: date,
+          endDate: date,
+          progress: 0,
+          sortOrder: 9999,
+          tags: [],
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const created = (await res.json()) as { id?: string };
+      markSaved();
+      setStatus("Milestone added.");
+      router.refresh();
+      setTimeout(() => setStatus(""), 1400);
+      if (created?.id) {
+        const newId = created.id;
+        pushUndo({
+          label: `milestone ${title}`,
+          run: async () => {
+            await fetch(`/api/tasks/${newId}?mode=cascade`, { method: "DELETE" });
+            try {
+              apiRef.current?.exec("delete-task", { id: newId });
+            } catch {
+              /* already gone */
+            }
+            router.refresh();
+          },
+        });
+      }
+    } catch (e: unknown) {
+      setStatus(e instanceof Error ? e.message : "Create milestone failed");
+    } finally {
+      setAddingTask(false);
+    }
+  }
+
   async function reparentTasks(
     childIds: string[],
     newParentId: string | null,
@@ -3043,6 +3143,18 @@ export default function GanttClient({
         </button>
         <button
           type="button"
+          onClick={() => void createMilestone(null)}
+          className="gantt-linkmode-btn"
+          title="Add a milestone. Right-click a workstream to attach one to its end date."
+          disabled={addingTask}
+        >
+          <span aria-hidden="true" style={{ marginRight: 4 }}>
+            ★
+          </span>
+          Milestone
+        </button>
+        <button
+          type="button"
           onClick={autoChainDependencies}
           className="gantt-linkmode-btn"
           title="Create sequential dependencies with one click"
@@ -3283,6 +3395,31 @@ export default function GanttClient({
               Add child task
             </button>
           )}
+          {contextMenu.scope.length === 1 &&
+            tasks.find((t) => t.id === contextMenu.taskId)?.rowType !==
+              "MILESTONE" && (
+              <button
+                type="button"
+                className="task-context-item"
+                onClick={() => {
+                  const id = contextMenu.taskId;
+                  setContextMenu(null);
+                  void createMilestone(id);
+                }}
+              >
+                <span className="task-context-icon" aria-hidden="true">
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="14"
+                    height="14"
+                    fill="currentColor"
+                  >
+                    <path d="M12 2.5 14.9 8.8 21.8 9.7 16.7 14.4 18 21.2 12 17.9 6 21.2 7.3 14.4 2.2 9.7 9.1 8.8z" />
+                  </svg>
+                </span>
+                Add milestone at end
+              </button>
+            )}
           <button
             type="button"
             className="task-context-item"
@@ -3662,6 +3799,55 @@ function DepsPicker({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Bar template used when a row's rowType is MILESTONE. Renders a
+ * flashing gold star centered on the milestone's date. Kept as its
+ * own component so TaskTemplate stays referentially stable for leaf
+ * bars — swapping the template tree across every re-render would
+ * thrash SVAR's internal DOM.
+ */
+function MilestoneBar({
+  id,
+  label,
+  done,
+  overdue,
+}: {
+  id: string;
+  label: string;
+  done: boolean;
+  overdue: boolean;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  return (
+    <div
+      ref={ref}
+      data-bar-id={id}
+      className={
+        "milestone-star" +
+        (done ? " milestone-star--done" : " milestone-star--open") +
+        (overdue ? " milestone-star--overdue" : "")
+      }
+      title={label ? `Milestone: ${label}` : "Milestone"}
+    >
+      <span className="milestone-star__glow" aria-hidden="true" />
+      <svg
+        viewBox="0 0 24 24"
+        width="28"
+        height="28"
+        aria-hidden="true"
+        focusable="false"
+        className="milestone-star__svg"
+      >
+        <path
+          d="M12 2.5 14.9 8.8 21.8 9.7 16.7 14.4 18 21.2 12 17.9 6 21.2 7.3 14.4 2.2 9.7 9.1 8.8z"
+          className="milestone-star__glyph"
+        />
+      </svg>
+      {label ? <span className="milestone-star__label">{label}</span> : null}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const TaskTypeEnum = z.enum(["EPIC", "TASK", "ISSUE"]);
+export const TaskTypeEnum = z.enum(["EPIC", "TASK", "ISSUE", "MILESTONE"]);
 export const StatusEnum = z.enum(["TODO", "IN_PROGRESS", "BLOCKED", "DONE"]);
 export const DepTypeEnum = z.enum(["FS", "SS", "FF", "SF"]);
 

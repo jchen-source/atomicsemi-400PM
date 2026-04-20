@@ -297,6 +297,25 @@ export default function GanttClient({
     | null
   >(null);
   const [savedTick, setSavedTick] = useState(0);
+
+  // Undo stack. Each entry knows how to reverse a user-visible mutation
+  // (patch a task back to prior values, recreate a deleted link, etc.).
+  // We hold the stack in a ref so pushes don't trigger renders — a
+  // separate tick state re-renders the Undo button when its enabled
+  // state changes.
+  type UndoAction = { label: string; run: () => Promise<void> | void };
+  const undoStackRef = useRef<UndoAction[]>([]);
+  const [undoTick, setUndoTick] = useState(0);
+  const isUndoingRef = useRef(false);
+  const bumpUndoTick = () => setUndoTick((n) => (n + 1) & 0xfffffff);
+  const pushUndo = (a: UndoAction) => {
+    if (isUndoingRef.current) return;
+    undoStackRef.current.push(a);
+    if (undoStackRef.current.length > 50) undoStackRef.current.shift();
+    bumpUndoTick();
+  };
+  const undoLastRef = useRef<() => Promise<void>>(async () => {});
+
   const [deleteModal, setDeleteModal] = useState<{
     id: string;
     title: string;
@@ -358,6 +377,59 @@ export default function GanttClient({
     return () => {
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     };
+  }, []);
+
+  // Cmd/Ctrl+Z runs the top of the undo stack. The actual run fn is
+  // held in a ref so it can close over current values without us
+  // needing to reattach the listener on every render.
+  undoLastRef.current = async () => {
+    const a = undoStackRef.current.pop();
+    bumpUndoTick();
+    if (!a) {
+      setStatus("Nothing to undo.");
+      setTimeout(() => setStatus(""), 1200);
+      return;
+    }
+    isUndoingRef.current = true;
+    setStatus(`Undoing: ${a.label}…`);
+    try {
+      await a.run();
+      markSaved();
+      setStatus("Undone.");
+      setTimeout(() => setStatus(""), 1200);
+    } catch (err) {
+      setStatus(err instanceof Error ? `Undo failed: ${err.message}` : "Undo failed");
+      setTimeout(() => setStatus(""), 2400);
+    } finally {
+      isUndoingRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const isZ = e.key === "z" || e.key === "Z";
+      if (!isZ) return;
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.shiftKey || e.altKey) return; // reserve shift-Z for redo (future)
+      const t = e.target as HTMLElement | null;
+      // Don't hijack undo inside a focused text input / contenteditable —
+      // the user expects the browser's native text-edit undo there.
+      if (t) {
+        const tag = t.tagName;
+        if (
+          tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          tag === "SELECT" ||
+          t.isContentEditable
+        ) {
+          return;
+        }
+      }
+      e.preventDefault();
+      void undoLastRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   // Shared commit path for the inline single-click cell editors. Cells are
@@ -1520,6 +1592,40 @@ export default function GanttClient({
       }
     }
 
+    // Snapshot the pre-edit values of the exact fields being changed so
+    // we can push a reversible undo action after the save succeeds.
+    // We pull from knownTaskState (source of truth for the currently
+    // rendered row) and the server tasks prop (for fields we don't
+    // cache locally, like assignee).
+    const preState = knownTaskState.current.get(id);
+    const preTask = tasks.find((x) => x.id === id);
+    const inversePayload: Record<string, unknown> = {};
+    const labelBits: string[] = [];
+    if ("title" in payload && preState) {
+      inversePayload.title = preState.text;
+      labelBits.push("name");
+    }
+    if ("progress" in payload && preState) {
+      inversePayload.progress = preState.progress;
+      labelBits.push("%");
+    }
+    if ("startDate" in payload && preState) {
+      inversePayload.startDate = new Date(preState.startMs).toISOString();
+      labelBits.push("start");
+    }
+    if ("endDate" in payload && preState) {
+      inversePayload.endDate = new Date(preState.endMs).toISOString();
+      labelBits.push("end");
+    }
+    if ("effortHours" in payload && preState) {
+      inversePayload.effortHours = preState.effortHours;
+      labelBits.push("hours");
+    }
+    if ("assignee" in payload) {
+      inversePayload.assignee = preTask?.assignee ?? null;
+      labelBits.push("assignee");
+    }
+
     setStatus("Saving…");
     inFlightIds.current.add(id);
     try {
@@ -1577,6 +1683,22 @@ export default function GanttClient({
       applyAffected(affected);
       markSaved();
       setStatus("");
+
+      // Push the inverse edit onto the undo stack (unless we're
+      // already in the middle of replaying one).
+      if (Object.keys(inversePayload).length > 0) {
+        const name = preTask?.text ?? preState?.text ?? "task";
+        const label =
+          labelBits.length === 0
+            ? `edit ${name}`
+            : `${labelBits.join(", ")} on ${name}`;
+        pushUndo({
+          label,
+          run: async () => {
+            await commitInlineEditRef.current(id, inversePayload);
+          },
+        });
+      }
       // Intentionally do NOT call router.refresh() here. The server already
       // returned the authoritative row + all affected rollups, and we just
       // pushed them into SVAR's store directly. Triggering a Next.js
@@ -1716,6 +1838,33 @@ export default function GanttClient({
 
       if (Object.keys(payload).length === 0) return;
 
+      // Capture pre-edit values for the same set of fields actually
+      // being changed, so Cmd+Z can revert a bar drag / resize / inline
+      // SVAR edit.
+      const inverseSvarPayload: Record<string, unknown> = {};
+      const svarLabelBits: string[] = [];
+      if ("title" in payload && prev) {
+        inverseSvarPayload.title = prev.text;
+        svarLabelBits.push("name");
+      }
+      if ("progress" in payload && prev) {
+        inverseSvarPayload.progress = prev.progress;
+        svarLabelBits.push("%");
+      }
+      if ("startDate" in payload && prev) {
+        inverseSvarPayload.startDate = new Date(prev.startMs).toISOString();
+        svarLabelBits.push("start");
+      }
+      if ("endDate" in payload && prev) {
+        inverseSvarPayload.endDate = new Date(prev.endMs).toISOString();
+        svarLabelBits.push("end");
+      }
+      if ("effortHours" in payload && prev) {
+        inverseSvarPayload.effortHours = prev.effortHours;
+        svarLabelBits.push("hours");
+      }
+      const svarTaskName = prev?.text ?? "task";
+
       setStatus("Saving…");
       inFlightIds.current.add(data.id);
       patchTask(data.id, payload)
@@ -1752,6 +1901,19 @@ export default function GanttClient({
           markSaved();
           setStatus("Saved");
           setTimeout(() => setStatus(""), 1000);
+
+          if (Object.keys(inverseSvarPayload).length > 0) {
+            const label =
+              svarLabelBits.length === 0
+                ? `edit ${svarTaskName}`
+                : `${svarLabelBits.join(", ")} on ${svarTaskName}`;
+            pushUndo({
+              label,
+              run: async () => {
+                await commitInlineEditRef.current(data.id, inverseSvarPayload);
+              },
+            });
+          }
         })
         .catch((e: unknown) =>
           setStatus(e instanceof Error ? e.message : "Save failed"),
@@ -1812,6 +1974,25 @@ export default function GanttClient({
           );
           if (!data?.existed) markSaved();
           setTimeout(() => setStatus(""), 900);
+
+          // Push undo: deleting the just-created dependency both on
+          // the server and in SVAR's store.
+          if (!data?.existed && realId) {
+            const srcName = tasks.find((t) => t.id === source)?.text ?? source;
+            const tgtName = tasks.find((t) => t.id === target)?.text ?? target;
+            pushUndo({
+              label: `dependency ${srcName} → ${tgtName}`,
+              run: async () => {
+                await fetch(`/api/dependencies/${realId}`, { method: "DELETE" });
+                try {
+                  apiRef.current?.exec("delete-link", { id: realId });
+                } catch {
+                  /* link may already be gone from the chart */
+                }
+                scheduleServerSync();
+              },
+            });
+          }
           // Resync the server-fetched tasks so the left-pane
           // "Depends on" column rebuilds with the new predecessor name.
           // Without this, a drag-drawn arrow on the chart shows as a
@@ -1833,11 +2014,58 @@ export default function GanttClient({
       const id = linkIdAlias.current.get(incomingId) ?? incomingId;
       if (!id) return;
       linkIdAlias.current.delete(incomingId);
+      // Capture the link's endpoints & type from the current `links`
+      // snapshot before we kill it server-side — we need these to
+      // recreate it on undo.
+      const deleted = links.find((l) => l.id === id);
       fetch(`/api/dependencies/${id}`, { method: "DELETE" })
         .then(() => {
           // Rebuild the left-pane "Depends on" column text so the
           // deleted predecessor name disappears immediately.
           scheduleServerSync();
+
+          if (deleted) {
+            const srcName =
+              tasks.find((t) => t.id === deleted.source)?.text ?? deleted.source;
+            const tgtName =
+              tasks.find((t) => t.id === deleted.target)?.text ?? deleted.target;
+            pushUndo({
+              label: `delete dependency ${srcName} → ${tgtName}`,
+              run: async () => {
+                const res = await fetch("/api/dependencies", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({
+                    predecessorId: deleted.source,
+                    dependentId: deleted.target,
+                    type: LINK_TYPE_TO_DEP[deleted.type] ?? "FS",
+                  }),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                  throw new Error(data?.error ?? "Dependency restore failed");
+                }
+                const newId = data?.dependency?.id
+                  ? String(data.dependency.id)
+                  : "";
+                if (newId) {
+                  try {
+                    apiRef.current?.exec("add-link", {
+                      id: newId,
+                      link: {
+                        source: deleted.source,
+                        target: deleted.target,
+                        type: deleted.type,
+                      },
+                    });
+                  } catch {
+                    /* SVAR may reject duplicates; server refresh catches up */
+                  }
+                }
+                scheduleServerSync();
+              },
+            });
+          }
         })
         .catch(() => {
           /* ignore */
@@ -1935,6 +2163,19 @@ export default function GanttClient({
           next.add(created.id!);
           return next;
         });
+        const newId = created.id;
+        pushUndo({
+          label: "create task",
+          run: async () => {
+            await fetch(`/api/tasks/${newId}?mode=cascade`, { method: "DELETE" });
+            try {
+              apiRef.current?.exec("delete-task", { id: newId });
+            } catch {
+              /* already gone */
+            }
+            router.refresh();
+          },
+        });
       }
       markSaved();
       setStatus("Click anywhere on the timeline to place your new task.");
@@ -1994,6 +2235,14 @@ export default function GanttClient({
         ? `Moving "${byId.get(valid[0])?.text ?? "task"}" under ${targetName}…`
         : `Moving ${valid.length} tasks under ${targetName}…`,
     );
+    // Snapshot the prior parent of each child being moved so Undo can
+    // restore the exact previous nesting (including multiple children
+    // that came from different parents).
+    const priorParents = new Map<string, string | null>();
+    for (const id of valid) {
+      priorParents.set(id, byId.get(id)?.parent ?? null);
+    }
+
     try {
       await Promise.all(
         valid.map((id) =>
@@ -2014,6 +2263,38 @@ export default function GanttClient({
       );
       router.refresh();
       setTimeout(() => setStatus(""), 1500);
+
+      pushUndo({
+        label:
+          valid.length === 1
+            ? `move ${byId.get(valid[0])?.text ?? "task"}`
+            : `move ${valid.length} tasks`,
+        run: async () => {
+          // Group ids by their prior parent so we send one PATCH per
+          // group instead of N requests.
+          const groups = new Map<string | null, string[]>();
+          for (const id of valid) {
+            const p = priorParents.get(id) ?? null;
+            const arr = groups.get(p) ?? [];
+            arr.push(id);
+            groups.set(p, arr);
+          }
+          await Promise.all(
+            Array.from(groups.entries()).flatMap(([parent, ids]) =>
+              ids.map((id) =>
+                fetch(`/api/tasks/${id}`, {
+                  method: "PATCH",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ parentId: parent }),
+                }).then(async (r) => {
+                  if (!r.ok) throw new Error(await r.text());
+                }),
+              ),
+            ),
+          );
+          router.refresh();
+        },
+      });
     } catch (e: unknown) {
       setStatus(e instanceof Error ? e.message : "Move failed");
     }
@@ -2767,6 +3048,20 @@ export default function GanttClient({
           title="Create sequential dependencies with one click"
         >
           Auto-link
+        </button>
+        <button
+          type="button"
+          onClick={() => void undoLastRef.current()}
+          className="gantt-linkmode-btn"
+          disabled={undoStackRef.current.length === 0}
+          title={
+            undoStackRef.current.length === 0
+              ? "Nothing to undo"
+              : `Undo ${undoStackRef.current[undoStackRef.current.length - 1]?.label ?? "last change"} (⌘Z)`
+          }
+          data-undo-tick={undoTick}
+        >
+          ↶ Undo
         </button>
         <button
           type="button"

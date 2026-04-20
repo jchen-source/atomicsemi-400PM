@@ -288,6 +288,14 @@ export default function GanttClient({
     | null
   >(null);
   const [resourceQuery, setResourceQuery] = useState("");
+
+  // Floating "quick edit" popover opened by double-clicking a bar in
+  // the timeline. Anchored to the bar's client rect and closed by
+  // Escape / outside click / explicit Save.
+  const [barEditor, setBarEditor] = useState<
+    | { taskId: string; anchor: { top: number; left: number; width: number } }
+    | null
+  >(null);
   const [savedTick, setSavedTick] = useState(0);
   const [deleteModal, setDeleteModal] = useState<{
     id: string;
@@ -2499,7 +2507,39 @@ export default function GanttClient({
       ev.stopPropagation();
     };
 
+    // Double-click a bar to open the quick-edit popover. We anchor off
+    // the .task-pill-wrap (our template root — has data-bar-id) so the
+    // popover lines up with the bar regardless of SVAR's internal
+    // container chrome around it.
+    const onDblClick = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (!target) return;
+      const barEl = target.closest("[data-bar-id]") as HTMLElement | null;
+      if (!barEl) return;
+      const id = barEl.getAttribute("data-bar-id");
+      if (!id) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const rect = barEl.getBoundingClientRect();
+      const POPOVER_W = 320;
+      const left = Math.max(
+        12,
+        Math.min(
+          window.innerWidth - POPOVER_W - 12,
+          rect.left + rect.width / 2 - POPOVER_W / 2,
+        ),
+      );
+      // Prefer anchoring below the bar; flip above if we'd fall off
+      // the viewport bottom.
+      const top =
+        rect.bottom + 8 + 360 > window.innerHeight
+          ? Math.max(12, rect.top - 8 - 360)
+          : rect.bottom + 8;
+      setBarEditor({ taskId: id, anchor: { top, left, width: POPOVER_W } });
+    };
+
     root.addEventListener("click", onClick);
+    root.addEventListener("dblclick", onDblClick, true);
     root.addEventListener("mousedown", onMouseDownCapture, true);
     // Pointer events bubble to us regardless of whether the browser
     // decides to synthesize a click (draggable ancestors can suppress
@@ -2519,6 +2559,7 @@ export default function GanttClient({
     root.addEventListener("contextmenu", onContextMenu, true);
     return () => {
       root.removeEventListener("click", onClick);
+      root.removeEventListener("dblclick", onDblClick, true);
       root.removeEventListener("mousedown", onMouseDownCapture, true);
       root.removeEventListener("pointerdown", onEditPointerDown);
       root.removeEventListener("pointerup", onEditPointerUp);
@@ -2829,6 +2870,24 @@ export default function GanttClient({
           onSelect={(name) => void assignResource(name)}
         />
       )}
+
+      {barEditor &&
+        (() => {
+          const t = tasks.find((x) => x.id === barEditor.taskId);
+          if (!t) return null;
+          return (
+            <BarQuickEditor
+              anchor={barEditor.anchor}
+              task={t}
+              people={people}
+              onCancel={() => setBarEditor(null)}
+              onSave={async (patch) => {
+                await commitInlineEditRef.current(barEditor.taskId, patch);
+                setBarEditor(null);
+              }}
+            />
+          );
+        })()}
 
       {contextMenu && (
         <div
@@ -3420,6 +3479,257 @@ function parseDateInputLocal(s: string): Date | null {
   const d = Number(m[3]);
   const date = new Date(y, mo - 1, d, 12, 0, 0, 0);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+/**
+ * Floating popover opened by double-clicking a bar in the Gantt chart.
+ * Lets the user edit the most frequently changed task fields in one
+ * place — name, dates, %, hours, and assignee — without leaving the
+ * chart. Commits the full diff in a single patch on Save so server-side
+ * rollups / dependency rescheduling see everything at once.
+ */
+function BarQuickEditor({
+  anchor,
+  task,
+  people,
+  onCancel,
+  onSave,
+}: {
+  anchor: { top: number; left: number; width: number };
+  task: GanttTaskInput;
+  people: Array<{ id: string; name: string; role: string | null; active: boolean }>;
+  onCancel: () => void;
+  onSave: (patch: Record<string, unknown>) => Promise<void>;
+}) {
+  const startISO = useMemo(() => {
+    const d = new Date(task.start);
+    return Number.isNaN(d.getTime()) ? "" : shortDate(d);
+  }, [task.start]);
+  const endISO = useMemo(() => {
+    const d = new Date(task.end);
+    return Number.isNaN(d.getTime()) ? "" : shortDate(d);
+  }, [task.end]);
+
+  const [name, setName] = useState(task.text);
+  const [start, setStart] = useState(startISO);
+  const [end, setEnd] = useState(endISO);
+  const [progress, setProgress] = useState(
+    String(Math.round(Number(task.progress ?? 0))),
+  );
+  const [effort, setEffort] = useState(
+    task.effortHours == null ? "" : String(task.effortHours),
+  );
+  const [assignee, setAssignee] = useState(task.assignee ?? "");
+  const [saving, setSaving] = useState(false);
+
+  const ref = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    // Focus the name field on open for keyboard-first editing.
+    const el = ref.current?.querySelector<HTMLInputElement>(
+      "input[data-autofocus]",
+    );
+    el?.focus();
+    el?.select();
+  }, []);
+
+  // Escape to close; click outside to close. The popover itself swallows
+  // its own clicks so internal interactions don't count as "outside".
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current) return;
+      if (ref.current.contains(e.target as Node)) return;
+      onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onDown);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onDown);
+    };
+  }, [onCancel]);
+
+  const trySave = async () => {
+    if (saving) return;
+    setSaving(true);
+    const patch: Record<string, unknown> = {};
+    const trimmedName = name.trim();
+    if (trimmedName && trimmedName !== task.text) patch.title = trimmedName;
+    if (start && start !== startISO) {
+      const d = parseDateInputLocal(start);
+      if (d) patch.startDate = d.toISOString();
+    }
+    if (end && end !== endISO) {
+      const d = parseDateInputLocal(end);
+      if (d) patch.endDate = d.toISOString();
+    }
+    const p = Number(progress);
+    if (Number.isFinite(p)) {
+      const clamped = Math.max(0, Math.min(100, Math.round(p)));
+      if (clamped !== Math.round(Number(task.progress ?? 0))) {
+        patch.progress = clamped;
+      }
+    }
+    const e = effort.trim();
+    if (e === "") {
+      if (task.effortHours != null) patch.effortHours = null;
+    } else {
+      const n = Number(e);
+      if (Number.isFinite(n) && n !== Number(task.effortHours ?? NaN)) {
+        patch.effortHours = Math.max(0, n);
+      }
+    }
+    const aTrim = assignee.trim();
+    const currentAssignee = (task.assignee ?? "").trim();
+    if (aTrim !== currentAssignee) {
+      patch.assignee = aTrim === "" ? null : aTrim;
+    }
+
+    if (Object.keys(patch).length === 0) {
+      setSaving(false);
+      onCancel();
+      return;
+    }
+    try {
+      await onSave(patch);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const popover = (
+    <div
+      ref={ref}
+      className="bar-quick-editor"
+      role="dialog"
+      aria-label="Edit task"
+      style={{
+        top: anchor.top,
+        left: anchor.left,
+        width: anchor.width,
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div className="bar-quick-editor__header">
+        <span className="bar-quick-editor__title">Edit task</span>
+        <button
+          type="button"
+          className="bar-quick-editor__close"
+          onClick={onCancel}
+          aria-label="Close"
+        >
+          ×
+        </button>
+      </div>
+
+      <label className="bar-quick-editor__field">
+        <span>Name</span>
+        <input
+          data-autofocus
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void trySave();
+            }
+          }}
+        />
+      </label>
+
+      <div className="bar-quick-editor__row">
+        <label className="bar-quick-editor__field">
+          <span>Start</span>
+          <input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+          />
+        </label>
+        <label className="bar-quick-editor__field">
+          <span>End</span>
+          <input
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+          />
+        </label>
+      </div>
+
+      <div className="bar-quick-editor__row">
+        <label className="bar-quick-editor__field">
+          <span>% complete</span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={5}
+            value={progress}
+            onChange={(e) => setProgress(e.target.value)}
+          />
+        </label>
+        <label className="bar-quick-editor__field">
+          <span>Hours</span>
+          <input
+            type="number"
+            min={0}
+            step={0.5}
+            value={effort}
+            placeholder="—"
+            onChange={(e) => setEffort(e.target.value)}
+          />
+        </label>
+      </div>
+
+      <label className="bar-quick-editor__field">
+        <span>Assignee</span>
+        <input
+          type="text"
+          list="bar-quick-editor-people"
+          value={assignee}
+          placeholder="Unassigned"
+          onChange={(e) => setAssignee(e.target.value)}
+        />
+        <datalist id="bar-quick-editor-people">
+          {people
+            .filter((p) => p.active)
+            .map((p) => (
+              <option key={p.id} value={p.name}>
+                {p.role ?? ""}
+              </option>
+            ))}
+        </datalist>
+      </label>
+
+      <div className="bar-quick-editor__actions">
+        <button
+          type="button"
+          className="bar-quick-editor__btn bar-quick-editor__btn--ghost"
+          onClick={onCancel}
+          disabled={saving}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="bar-quick-editor__btn bar-quick-editor__btn--primary"
+          onClick={() => void trySave()}
+          disabled={saving}
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </div>
+  );
+
+  if (typeof document === "undefined") return null;
+  return createPortal(popover, document.body);
 }
 
 function ParentPicker({

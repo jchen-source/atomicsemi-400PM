@@ -177,6 +177,14 @@ export default function GanttClient({
     (id: string, payload: Record<string, unknown>) => Promise<void>
   >(async () => {});
 
+  // Size the Task column once, on initial mount, to fit the longest task
+  // name that actually ships with the page. Locked in via useState
+  // initializer so later edits don't reflow the column under the user.
+  // They can still drag-resize it manually afterward.
+  const [taskColumnWidth] = useState<number>(() =>
+    computeInitialTaskColumnWidth(tasks),
+  );
+
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     setDark(mq.matches);
@@ -934,10 +942,11 @@ export default function GanttClient({
       {
         id: "text",
         header: "Task",
-        // Wide enough that the drag handle, hierarchy chip, full task name,
-        // child-count badge, and hover actions all breathe. Resizable in the
-        // grid, but this default is tuned for real workstream/task names.
-        width: 380,
+        // Auto-sized once on mount to fit the longest task name actually
+        // present in the initial payload (clamped 260–560px). Users can
+        // still drag-resize the column afterwards — we only set the
+        // starting value so they don't land on a squished column.
+        width: taskColumnWidth,
         align: "left" as const,
         editor: "text",
         cell: TaskNameCell,
@@ -1005,6 +1014,7 @@ export default function GanttClient({
       EffortCell,
       ResourcesCell,
       DaysCell,
+      taskColumnWidth,
     ],
   );
 
@@ -2192,6 +2202,50 @@ function shortDate(d: Date) {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
+}
+
+// Cached offscreen canvas for text width measurement. The Task column
+// uses this on first mount to size itself to whatever the longest task
+// name actually needs, so users don't land on a squished column by
+// default. Falls back to a rough character count during SSR.
+let _measureCanvas: HTMLCanvasElement | null = null;
+function measureTextPx(text: string, font: string): number {
+  if (typeof document === "undefined") return text.length * 7;
+  if (!_measureCanvas) _measureCanvas = document.createElement("canvas");
+  const ctx = _measureCanvas.getContext("2d");
+  if (!ctx) return text.length * 7;
+  ctx.font = font;
+  return ctx.measureText(text).width;
+}
+
+/**
+ * Pick a Task column width that fits the widest task name in `tasks`
+ * once on first mount. Budget accounts for the grip icon, hierarchy
+ * chip, child-count badge, and the hover action buttons so the row
+ * never overlaps its own UI. Clamped so a single very long name
+ * doesn't push the column past a laptop-friendly size.
+ */
+function computeInitialTaskColumnWidth(
+  tasks: Array<{ text?: string }>,
+  defaultWidth = 380,
+): number {
+  if (!tasks || tasks.length === 0) return defaultWidth;
+  const font =
+    '500 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, ' +
+    '"Helvetica Neue", Arial, sans-serif';
+  let maxTextPx = 0;
+  for (const t of tasks) {
+    const w = measureTextPx(String(t?.text ?? ""), font);
+    if (w > maxTextPx) maxTextPx = w;
+  }
+  // Fixed UI budget next to the task name inside the cell:
+  //   grip (12) + gap (8) + chip (~72 worst-case "WORKSTREAM") + gap (8)
+  //   + child-count badge (~22) + actions space (~52) + cell padding (~24)
+  const uiBudget = 12 + 8 + 72 + 8 + 22 + 52 + 24;
+  const desired = Math.ceil(maxTextPx + uiBudget);
+  const MIN_WIDTH = 260;
+  const MAX_WIDTH = 560;
+  return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, desired));
 }
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;

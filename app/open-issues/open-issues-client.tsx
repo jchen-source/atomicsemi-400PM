@@ -688,18 +688,30 @@ export default function OpenIssuesClient({
                   <option value="low">Low</option>
                 </select>
               </Field>
-              <Field label="Progress">
-                <div className="flex items-center gap-2">
-                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-200">
-                    <div
-                      className="h-full rounded-full bg-blue-500"
-                      style={{ width: `${Math.min(100, Math.max(0, r.progress))}%` }}
-                    />
-                  </div>
-                  <span className="font-medium text-slate-700">
-                    {r.progress}%
-                  </span>
-                </div>
+              <Field label="Progress" wide>
+                <ProgressEditor
+                  value={r.progress}
+                  onCommit={(next) => {
+                    // Auto-resolve / auto-reopen so progress and status stay
+                    // consistent without an extra click during standup.
+                    const patch: Parameters<typeof patchIssue>[1] = {
+                      progress: next,
+                    };
+                    if (next === 100 && r.status !== "DONE") {
+                      patch.status = "DONE";
+                    } else if (next < 100 && r.status === "DONE") {
+                      patch.status = "IN_PROGRESS";
+                    }
+                    patchIssue(r.id, patch);
+                  }}
+                  onLocalChange={(next) =>
+                    setRows((prev) =>
+                      prev.map((x) =>
+                        x.id === r.id ? { ...x, progress: next } : x,
+                      ),
+                    )
+                  }
+                />
               </Field>
               <Field label="Linked task / subtask" wide>
                 <select
@@ -807,6 +819,112 @@ export default function OpenIssuesClient({
               )}
             </div>
           </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ProgressEditor({
+  value,
+  onCommit,
+  onLocalChange,
+}: {
+  value: number;
+  onCommit: (next: number) => void;
+  onLocalChange: (next: number) => void;
+}) {
+  const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
+  const v = clamp(value);
+  const barColor =
+    v >= 100
+      ? "bg-emerald-500"
+      : v >= 66
+        ? "bg-blue-500"
+        : v >= 33
+          ? "bg-sky-400"
+          : "bg-slate-400";
+
+  const quick = [0, 25, 50, 75, 100];
+
+  return (
+    <div className="space-y-1.5">
+      {/* Slider with live track fill + numeric input */}
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+            <div
+              className={`h-full rounded-full transition-[width] duration-150 ${barColor}`}
+              style={{ width: `${v}%` }}
+            />
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={v}
+            onChange={(e) => onLocalChange(clamp(Number(e.target.value)))}
+            onMouseUp={(e) =>
+              onCommit(clamp(Number((e.target as HTMLInputElement).value)))
+            }
+            onTouchEnd={(e) =>
+              onCommit(clamp(Number((e.target as HTMLInputElement).value)))
+            }
+            onKeyUp={(e) => {
+              const key = e.key;
+              if (
+                key === "ArrowLeft" ||
+                key === "ArrowRight" ||
+                key === "ArrowUp" ||
+                key === "ArrowDown" ||
+                key === "Home" ||
+                key === "End" ||
+                key === "PageUp" ||
+                key === "PageDown"
+              ) {
+                onCommit(clamp(Number((e.target as HTMLInputElement).value)));
+              }
+            }}
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+            aria-label="Progress percent"
+          />
+        </div>
+        <div className="flex items-center gap-0.5">
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={5}
+            value={v}
+            onChange={(e) => onLocalChange(clamp(Number(e.target.value)))}
+            onBlur={(e) => onCommit(clamp(Number(e.target.value)))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                (e.target as HTMLInputElement).blur();
+              }
+            }}
+            className="w-12 rounded-md border border-border bg-white px-1 py-0.5 text-right text-xs tabular-nums"
+          />
+          <span className="text-[11px] text-slate-500">%</span>
+        </div>
+      </div>
+      {/* Quick-set preset buttons */}
+      <div className="flex gap-1">
+        {quick.map((q) => (
+          <button
+            key={q}
+            type="button"
+            onClick={() => onCommit(q)}
+            className={`flex-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+              v === q
+                ? "border-blue-300 bg-blue-50 text-blue-700"
+                : "border-border bg-white text-slate-600 hover:bg-slate-50"
+            }`}
+            title={q === 100 ? "Mark resolved" : `${q}%`}
+          >
+            {q}%
+          </button>
         ))}
       </div>
     </div>

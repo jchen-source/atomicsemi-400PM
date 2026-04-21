@@ -3651,18 +3651,11 @@ export default function GanttClient({
     // Otherwise it scopes to just this one row and selects it so the
     // visual highlight matches what the menu will act on.
     const onContextMenu = (ev: MouseEvent) => {
-      // Right-click resolves to a task id via either the table row wrap
-      // (`data-task-drag-id` on the grid cells) or the bar in the timeline
-      // pane (`data-bar-id` on the rendered bar template). Previously the
-      // menu only opened over the table, so right-clicking a bar in the
-      // timeline did nothing and users had no quick way to change dates /
-      // dependencies from the chart side.
-      const target = ev.target as HTMLElement | null;
-      const wrap = target?.closest("[data-task-drag-id]") as HTMLElement | null;
-      const barEl = target?.closest("[data-bar-id]") as HTMLElement | null;
-      const id = wrap?.getAttribute("data-task-drag-id") ||
-        barEl?.getAttribute("data-bar-id") ||
-        "";
+      const wrap = (ev.target as HTMLElement | null)?.closest(
+        "[data-task-drag-id]",
+      ) as HTMLElement | null;
+      if (!wrap) return;
+      const id = wrap.getAttribute("data-task-drag-id");
       if (!id) return;
       ev.preventDefault();
       ev.stopPropagation();
@@ -4727,107 +4720,6 @@ export default function GanttClient({
               : (tasks.find((t) => t.id === contextMenu.taskId)?.text ??
                 "Task")}
           </div>
-          {contextMenu.scope.length === 1 && (
-            <button
-              type="button"
-              className="task-context-item"
-              onClick={() => {
-                const id = contextMenu.taskId;
-                setContextMenu(null);
-                // Anchor the quick-editor popover next to the task's bar
-                // when we can find one; fall back to anchoring at the
-                // click position (right-click originated inside the table
-                // or the bar hasn't been rendered yet).
-                const root = frameRef.current;
-                const barEl = root
-                  ? (root.querySelector(
-                      `[data-bar-id="${CSS.escape(id)}"]`,
-                    ) as HTMLElement | null)
-                  : null;
-                const POPOVER_W = 320;
-                let top: number;
-                let left: number;
-                if (barEl) {
-                  const rect = barEl.getBoundingClientRect();
-                  left = Math.max(
-                    12,
-                    Math.min(
-                      window.innerWidth - POPOVER_W - 12,
-                      rect.left + rect.width / 2 - POPOVER_W / 2,
-                    ),
-                  );
-                  top =
-                    rect.bottom + 8 + 360 > window.innerHeight
-                      ? Math.max(12, rect.top - 8 - 360)
-                      : rect.bottom + 8;
-                } else {
-                  left = Math.max(
-                    12,
-                    Math.min(
-                      window.innerWidth - POPOVER_W - 12,
-                      contextMenu.x,
-                    ),
-                  );
-                  top = Math.min(
-                    window.innerHeight - 380,
-                    contextMenu.y,
-                  );
-                }
-                setBarEditor({
-                  taskId: id,
-                  anchor: { top, left, width: POPOVER_W },
-                });
-              }}
-            >
-              <span className="task-context-icon" aria-hidden="true">
-                <svg
-                  viewBox="0 0 24 24"
-                  width="14"
-                  height="14"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <rect x="3" y="5" width="18" height="16" rx="2" />
-                  <path d="M16 3v4M8 3v4M3 11h18" />
-                </svg>
-              </span>
-              Edit dates &amp; details…
-            </button>
-          )}
-          {contextMenu.scope.length === 1 && (
-            <button
-              type="button"
-              className="task-context-item"
-              onClick={() => {
-                const id = contextMenu.taskId;
-                setContextMenu(null);
-                openDependencyEditor(id);
-              }}
-            >
-              <span className="task-context-icon" aria-hidden="true">
-                <svg
-                  viewBox="0 0 24 24"
-                  width="14"
-                  height="14"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1" />
-                  <path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" />
-                </svg>
-              </span>
-              Edit dependencies…
-            </button>
-          )}
-          {contextMenu.scope.length === 1 && (
-            <div className="task-context-sep" />
-          )}
           {contextMenu.scope.length === 1 && (
             <button
               type="button"

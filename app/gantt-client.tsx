@@ -5356,9 +5356,23 @@ function TodayOverlay({
     // caused severe flicker when SVAR thrashed bar styles on hover).
     // Fire a short retry tail after mount so placement reliably
     // converges even if every observer missed the relevant mutation.
-    const retryTimers = [16, 50, 150, 400, 1000, 2500].map((ms) =>
+    const retryTimers = [16, 50, 150, 400, 1000, 2500, 5000].map((ms) =>
       window.setTimeout(schedule, ms),
     );
+
+    // Belt-and-suspenders poll: on a slow cold boot (Render spin-up,
+    // slow network) SVAR can take longer than 5s to finish its mount.
+    // If the placement still hasn't resolved after the retry tail,
+    // keep polling at 500ms until we see a connected placement. The
+    // poll stops itself as soon as lastPlacementRef is populated (set
+    // inside the useMemo below), so this is cheap steady-state.
+    const poll = window.setInterval(() => {
+      if (lastPlacementRef.current?.areaEl.isConnected) {
+        window.clearInterval(poll);
+        return;
+      }
+      schedule();
+    }, 500);
 
     schedule();
     return () => {
@@ -5369,6 +5383,7 @@ function TodayOverlay({
       window.removeEventListener("resize", schedule);
       window.clearTimeout(timer);
       for (const t of retryTimers) window.clearTimeout(t);
+      window.clearInterval(poll);
     };
   }, [frameRef]);
 
@@ -5413,11 +5428,31 @@ function TodayOverlay({
     }
 
     // ---- Strategy 2: no usable bar yet — locate the inner `.wx-area`
-    // directly. SVAR sets its scrollWidth based on the `start`/`end`
-    // props we pass, which match our `dateRange`, so we can map today
-    // linearly into that width without needing any bar.
+    // directly. SVAR renders at least two `.wx-area` elements (one
+    // viewport-width wrapper + one content-width container that holds
+    // the bars). Pick the content-width one by choosing whichever has
+    // the largest scrollWidth / offsetWidth. Falling back to the first
+    // one we find means the Today line occasionally anchored to the
+    // viewport wrapper, which has no scrollable overflow — the line
+    // then painted at the wrong pixel and could be clipped entirely
+    // by overflow:hidden on the wrapper. Picking the widest element
+    // guarantees we always land on the inner content container, which
+    // is what scrolls with the timeline.
     if (!area) {
+      const candidates = Array.from(
+        frame.querySelectorAll<HTMLElement>(".wx-area"),
+      );
+      let best: HTMLElement | null = null;
+      let bestW = 0;
+      for (const el of candidates) {
+        const w = Math.max(el.scrollWidth, el.offsetWidth);
+        if (w > bestW) {
+          bestW = w;
+          best = el;
+        }
+      }
       area =
+        best ??
         (frame.querySelector(".wx-chart .wx-area") as HTMLElement | null) ??
         (frame.querySelector(".wx-area") as HTMLElement | null);
     }

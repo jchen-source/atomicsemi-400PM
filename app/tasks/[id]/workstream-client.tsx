@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import {
   ISSUE_TYPES,
@@ -262,6 +263,66 @@ export default function WorkstreamClient({
     setHistory((prev) => [newSnapshot, ...prev]);
   };
 
+  // Remove a snapshot (history entry + burndown ping). The API
+  // also rewinds task state when the deleted row was the latest
+  // PROGRESS snapshot for its task — we mirror that locally so
+  // the workstream's big chart, mini cards, and chip colors stay
+  // consistent without waiting for a full server round-trip.
+  const onSnapshotDeleted = (
+    cardId: string,
+    deletedId: string,
+    nextState:
+      | {
+          progress: number;
+          status: string;
+          health: "green" | "yellow" | "red" | null;
+          blocked: boolean;
+          remainingEffort: number | null;
+        }
+      | null,
+  ) => {
+    setHistory((prev) => prev.filter((s) => s.id !== deletedId));
+    setBurnSnapshots((prev) => prev.filter((s) => s.id !== deletedId));
+    if (nextState) {
+      setCards((prev) =>
+        prev.map((c) =>
+          c.id === cardId
+            ? {
+                ...c,
+                progress: nextState.progress,
+                status: nextState.status,
+                health: nextState.health,
+                blocked: nextState.blocked,
+                remainingEffort: nextState.remainingEffort,
+              }
+            : c,
+        ),
+      );
+      setBurnTasks((prev) =>
+        prev.map((t) =>
+          t.id === cardId
+            ? {
+                ...t,
+                progress: nextState.progress,
+                status: nextState.status,
+                blocked: nextState.blocked,
+                health: nextState.health,
+              }
+            : t,
+        ),
+      );
+      if (header.id === cardId) {
+        setHeaderState((prev) => ({
+          ...prev,
+          progress: nextState.progress,
+          status: nextState.status,
+          health: nextState.health,
+          blocked: nextState.blocked,
+        }));
+      }
+    }
+  };
+
   // Owner change: card's chip popover PATCHes assignee. No rollup / chart
   // changes to mirror — just keep `cards` in sync so the card's own chip
   // re-renders with the new value on next re-render. Extracted out of
@@ -417,6 +478,7 @@ export default function WorkstreamClient({
                 onRescheduled={onRescheduled}
                 onIssueFiled={onIssueFiled}
                 onIssueResolved={onIssueResolved}
+                onSnapshotDeleted={onSnapshotDeleted}
               />
             ))}
           </div>
@@ -440,6 +502,7 @@ function TaskCard({
   onRescheduled,
   onIssueFiled,
   onIssueResolved,
+  onSnapshotDeleted,
 }: {
   card: ChildCard;
   history: WorkstreamSnapshot[];
@@ -448,6 +511,17 @@ function TaskCard({
   nowMs: number;
   people: PersonOption[];
   onOwnerChanged: (cardId: string, assignee: string | null) => void;
+  onSnapshotDeleted: (
+    cardId: string,
+    deletedId: string,
+    nextState: {
+      progress: number;
+      status: string;
+      health: "green" | "yellow" | "red" | null;
+      blocked: boolean;
+      remainingEffort: number | null;
+    } | null,
+  ) => void;
   onSaved: (
     cardId: string,
     affected: Array<{
@@ -1021,26 +1095,107 @@ function TaskCard({
               </li>
             ) : (
               history.map((s) => (
-                <li key={s.id} className="ws-history-item">
-                  <div className="ws-history-meta-line">
-                    <time>{fmtDateTime(new Date(s.createdAt))}</time>
-                    <span className="ws-history-numbers">
-                      {s.progress}%
-                      {s.remainingEffort != null
-                        ? ` · ${s.remainingEffort}h left`
-                        : ""}
-                      {s.blocked ? " · blocked" : ""}
-                    </span>
-                    <HealthPill health={s.health} compact />
-                  </div>
-                  {s.comment && <p>{s.comment}</p>}
-                </li>
+                <WsHistoryRow
+                  key={s.id}
+                  snap={s}
+                  cardId={card.id}
+                  onSnapshotDeleted={onSnapshotDeleted}
+                />
               ))
             )}
           </ol>
         )}
       </footer>
     </article>
+  );
+}
+
+// ---------- History row with inline delete ----------
+
+function WsHistoryRow({
+  snap,
+  cardId,
+  onSnapshotDeleted,
+}: {
+  snap: WorkstreamSnapshot;
+  cardId: string;
+  onSnapshotDeleted: (
+    cardId: string,
+    deletedId: string,
+    nextState: {
+      progress: number;
+      status: string;
+      health: "green" | "yellow" | "red" | null;
+      blocked: boolean;
+      remainingEffort: number | null;
+    } | null,
+  ) => void;
+}) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function remove() {
+    if (busy) return;
+    const ok = window.confirm(
+      "Delete this update? It will disappear from the history and the burndown chart.",
+    );
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tasks/${cardId}/updates/${snap.id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const body = (await res.json().catch(() => ({}))) as {
+        nextTaskState?: {
+          progress: number;
+          status: string;
+          health: "green" | "yellow" | "red" | null;
+          blocked: boolean;
+          remainingEffort: number | null;
+        } | null;
+      };
+      onSnapshotDeleted(cardId, snap.id, body.nextTaskState ?? null);
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li
+      className={"ws-history-item" + (busy ? " ws-history-item--busy" : "")}
+    >
+      <div className="ws-history-meta-line">
+        <time>{fmtDateTime(new Date(snap.createdAt))}</time>
+        <span className="ws-history-numbers">
+          {snap.progress}%
+          {snap.remainingEffort != null
+            ? ` · ${snap.remainingEffort}h left`
+            : ""}
+          {snap.blocked ? " · blocked" : ""}
+        </span>
+        <HealthPill health={snap.health} compact />
+        <button
+          type="button"
+          className="ws-history-delete"
+          onClick={remove}
+          disabled={busy}
+          aria-label="Delete this update"
+          title="Delete this update"
+        >
+          {busy ? "…" : "✕"}
+        </button>
+      </div>
+      {snap.comment && <p>{snap.comment}</p>}
+      {error && <p className="ws-history-error">{error}</p>}
+    </li>
   );
 }
 

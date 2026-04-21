@@ -604,6 +604,48 @@ export default function TasksClient({
               );
               router.refresh();
             }}
+            onSnapshotDeleted={(deletedId, nextState) => {
+              // Drop the row from the drawer's local history list.
+              setSnapshots((prev) => prev.filter((x) => x.id !== deletedId));
+              // Drop the matching ping from the burndown state so the
+              // chart redraws without the deleted dot.
+              setBurnSnapshots((prev) =>
+                prev.filter((x) => x.id !== deletedId),
+              );
+              if (nextState && active) {
+                // The deleted row was the latest PROGRESS snapshot —
+                // mirror the task's restored state into the row cache
+                // and the burndown task cache so the drawer numbers,
+                // chip colors, and rollups match the server.
+                setRows((prev) =>
+                  prev.map((r) =>
+                    r.id === active.id
+                      ? {
+                          ...r,
+                          progress: nextState.progress,
+                          status: nextState.status,
+                          health: nextState.health,
+                          blocked: nextState.blocked,
+                          remainingEffort: nextState.remainingEffort,
+                        }
+                      : r,
+                  ),
+                );
+                setBurnTasks((prev) =>
+                  prev.map((t) =>
+                    t.id === active.id
+                      ? {
+                          ...t,
+                          progress: nextState.progress,
+                          status: nextState.status,
+                          blocked: nextState.blocked,
+                          health: nextState.health,
+                        }
+                      : t,
+                  ),
+                );
+              }
+            }}
           />
         )}
       </div>
@@ -961,6 +1003,7 @@ function UpdateDrawer({
   people,
   onClose,
   onSaved,
+  onSnapshotDeleted,
 }: {
   row: TaskRow;
   snapshots: TaskSnapshot[];
@@ -980,6 +1023,20 @@ function UpdateDrawer({
     >;
     newSnapshot: TaskSnapshot | null;
   }) => void;
+  onSnapshotDeleted: (
+    deletedId: string,
+    // Populated by the parent when it knows the task's current state
+    // just changed because the deleted row was the most recent PROGRESS
+    // snapshot — lets the parent mirror the same fields back into its
+    // row / burndown caches without refetching.
+    nextState: {
+      progress: number;
+      status: TaskRow["status"];
+      health: TaskRow["health"];
+      blocked: boolean;
+      remainingEffort: number | null;
+    } | null,
+  ) => void;
 }) {
   const router = useRouter();
   const [progress, setProgress] = useState(row.progress);
@@ -1444,26 +1501,106 @@ function UpdateDrawer({
         ) : (
           <ol className="tasks-snapshot-list">
             {snapshots.map((s) => (
-              <li key={s.id} className="tasks-snapshot">
-                <div className="tasks-snapshot-meta">
-                  <time>{fmtDateTime(new Date(s.createdAt))}</time>
-                  <span className="tasks-snapshot-numbers">
-                    {s.progress ?? 0}%
-                    {s.remainingEffort != null
-                      ? ` · ${s.remainingEffort}h left`
-                      : ""}
-                  </span>
-                  <HealthDot
-                    health={(s.health as TaskRow["health"]) ?? null}
-                  />
-                </div>
-                {s.comment && <p>{s.comment}</p>}
-              </li>
+              <SnapshotRow
+                key={s.id}
+                snap={s}
+                taskId={row.id}
+                onDeleted={(deletedId, nextState) => {
+                  onSnapshotDeleted(deletedId, nextState);
+                  router.refresh();
+                }}
+              />
             ))}
           </ol>
         )}
       </section>
     </aside>
+  );
+}
+
+// A single history row with a trash button. Pulled out so the delete
+// request, its pending state, and the confirm dialog all live in one
+// spot — keeping the list render above focused on layout.
+function SnapshotRow({
+  snap,
+  taskId,
+  onDeleted,
+}: {
+  snap: TaskSnapshot;
+  taskId: string;
+  onDeleted: (
+    deletedId: string,
+    nextState: {
+      progress: number;
+      status: TaskRow["status"];
+      health: TaskRow["health"];
+      blocked: boolean;
+      remainingEffort: number | null;
+    } | null,
+  ) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function remove() {
+    if (busy) return;
+    const ok = window.confirm(
+      "Delete this update? It will disappear from the history and the burndown chart.",
+    );
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/updates/${snap.id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const body = (await res.json().catch(() => ({}))) as {
+        nextTaskState?: {
+          progress: number;
+          status: TaskRow["status"];
+          health: TaskRow["health"];
+          blocked: boolean;
+          remainingEffort: number | null;
+        } | null;
+      };
+      onDeleted(snap.id, body.nextTaskState ?? null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li
+      className={"tasks-snapshot" + (busy ? " tasks-snapshot--busy" : "")}
+    >
+      <div className="tasks-snapshot-meta">
+        <time>{fmtDateTime(new Date(snap.createdAt))}</time>
+        <span className="tasks-snapshot-numbers">
+          {snap.progress ?? 0}%
+          {snap.remainingEffort != null
+            ? ` · ${snap.remainingEffort}h left`
+            : ""}
+        </span>
+        <HealthDot health={(snap.health as TaskRow["health"]) ?? null} />
+        <button
+          type="button"
+          className="tasks-snapshot-delete"
+          onClick={remove}
+          disabled={busy}
+          aria-label="Delete this update"
+          title="Delete this update"
+        >
+          {busy ? "…" : "✕"}
+        </button>
+      </div>
+      {snap.comment && <p>{snap.comment}</p>}
+      {error && <p className="tasks-snapshot-error">{error}</p>}
+    </li>
   );
 }
 

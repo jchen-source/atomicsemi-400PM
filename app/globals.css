@@ -1456,6 +1456,74 @@ body {
   font-weight: 500;
 }
 
+/* Inline delete affordance on each history entry. Hidden-ish by default
+   so it doesn't compete with the content; lights up on hover/focus of the
+   containing row. The row itself gets `:focus-within` coverage for
+   keyboard navigation. */
+.tasks-snapshot,
+.ws-history-item {
+  position: relative;
+}
+
+.tasks-snapshot-delete,
+.ws-history-delete {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    color 120ms ease,
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.tasks-snapshot:hover .tasks-snapshot-delete,
+.tasks-snapshot:focus-within .tasks-snapshot-delete,
+.ws-history-item:hover .ws-history-delete,
+.ws-history-item:focus-within .ws-history-delete {
+  opacity: 1;
+}
+
+.tasks-snapshot-delete:hover,
+.tasks-snapshot-delete:focus-visible,
+.ws-history-delete:hover,
+.ws-history-delete:focus-visible {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
+  outline: none;
+}
+
+.tasks-snapshot-delete:disabled,
+.ws-history-delete:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.tasks-snapshot--busy,
+.ws-history-item--busy {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.tasks-snapshot-error,
+.ws-history-error {
+  margin: 4px 0 0 0;
+  color: #b91c1c;
+  font-size: 11px;
+}
+
 /* ---------- Burndown page (/burndown) ---------- */
 
 .burndown-page {

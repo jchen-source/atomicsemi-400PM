@@ -644,6 +644,15 @@ export default function GanttClient({
     (id: string, payload: Record<string, unknown>) => Promise<void>
   >(async () => {});
 
+  // Post-commit overlay for `effortHours`. SVAR's `update-task` merge
+  // treats custom-named fields inconsistently — sometimes the new value
+  // lands on the row, sometimes the row keeps the old value and the
+  // cell snaps back to what it was. Storing the authoritative value in
+  // this ref and consulting it from `EffortCell` guarantees the cell
+  // shows what the user just typed regardless of SVAR's internal merge
+  // behavior. Keyed by task id.
+  const effortOverridesRef = useRef<Map<string, number | null>>(new Map());
+
   // Registry of open-editor callbacks keyed by `${rowId}:${field}`. Every
   // InlineEditable registers its `setEditing(true)` here on mount and
   // cleans up on unmount. The frame-level pointer handler uses this to
@@ -2118,18 +2127,28 @@ export default function GanttClient({
       const rowId = String(row?.id ?? "");
       const kids = childCountByIdRef.current.get(rowId) ?? 0;
       const isParent = kids > 0;
-      const raw = row?.effortHours;
+      // Prefer the post-commit value we stashed locally. If SVAR's
+      // update-task merge drops custom fields (it happens with non-
+      // standard columns like `effortHours`), `row.effortHours` stays
+      // stale after a save and the cell re-rendered back to the old
+      // number, making it feel like the edit didn't stick. Reading the
+      // override first papers over that without needing a full
+      // router.refresh() flash.
+      const override = effortOverridesRef.current.get(rowId);
+      const raw = override !== undefined ? override : row?.effortHours;
       const hasValue = raw != null && raw !== "";
       const hrs = hasValue ? Math.max(0, Math.round(Number(raw))) : 0;
-      const progress = Math.max(0, Math.min(100, Number(row?.progress ?? 0)));
-      const remaining = hasValue ? Math.round(hrs * ((100 - progress) / 100)) : 0;
       const readOnlyReason = isParent
         ? `Rolls up from ${kids} child ${kids === 1 ? "task" : "tasks"} — edit children instead.`
         : undefined;
       const baseCls = "grid-cell-meta" + (isParent ? " grid-cell-meta--rollup" : "");
+      // Display the same number the editor lets you type. Showing
+      // "remaining" (total × (1 − progress)) here was actively
+      // misleading — users would enter `20`, see the cell snap to a
+      // different value after save, and conclude "it didn't save".
       const display = hasValue ? (
         <>
-          {remaining}h
+          {hrs}h
           {isParent ? <span className="grid-cell-rollup">Σ</span> : null}
         </>
       ) : (
@@ -2455,7 +2474,12 @@ export default function GanttClient({
         width: 84,
         align: "center" as const,
         cell: EffortCell,
-        editor: "text",
+        // NOTE: no `editor` here. Our `InlineEditable` inside `EffortCell`
+        // owns click-to-edit + commit. Declaring SVAR's native `text`
+        // editor alongside our cell caused the two to fight: SVAR would
+        // open its own editor on the same pointerup, swallow the blur,
+        // and the typed value never made it into `commitInlineEditRef`.
+        // That's the root of "I keep typing hours and it doesn't save".
       },
       {
         id: "resources",
@@ -2608,16 +2632,24 @@ export default function GanttClient({
       const prevState = knownTaskState.current.get(id);
       const startMs = t.startDate ? new Date(t.startDate).getTime() : prevState?.startMs ?? 0;
       const endMs = t.endDate ? new Date(t.endDate).getTime() : prevState?.endMs ?? 0;
+      const committedEffort =
+        t.effortHours === undefined
+          ? prevState?.effortHours ?? null
+          : t.effortHours;
       knownTaskState.current.set(id, {
         text: t.title ?? prevState?.text ?? "",
         progress: Number(t.progress ?? prevState?.progress ?? 0),
         startMs,
         endMs,
-        effortHours:
-          t.effortHours === undefined
-            ? prevState?.effortHours ?? null
-            : t.effortHours,
+        effortHours: committedEffort,
       });
+      // Mirror into the override map so EffortCell can read it even if
+      // SVAR's row merge drops the field below. Only record when the
+      // patch actually carried an effortHours value — otherwise we'd
+      // paper over genuinely unestimated rows with stale zeros.
+      if ("effortHours" in payload) {
+        effortOverridesRef.current.set(id, committedEffort);
+      }
 
       // Nudge SVAR with the authoritative server values so the grid row
       // reflects the commit immediately (title, progress, effort don't

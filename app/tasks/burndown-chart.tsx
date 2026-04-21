@@ -38,7 +38,11 @@ export type BurndownSnapshotInput = {
   id: string;
   taskId: string;
   createdAt: string;
-  progress: number;
+  /** PROGRESS snapshots move the line; OPEN_ISSUE ones are qualitative pings
+   *  at the then-current Y. Defaults to PROGRESS for backwards compat. */
+  commentType?: "PROGRESS" | "OPEN_ISSUE";
+  /** Null when the update didn't touch progress (e.g. a pure OPEN_ISSUE note). */
+  progress: number | null;
   remainingEffort: number | null;
   status: string | null;
   health: "green" | "yellow" | "red" | null;
@@ -82,6 +86,10 @@ export type ActualPoint = {
   postEnd: boolean;
   /** Optional comment pushed alongside this snapshot. */
   comment?: string;
+  /** Effective type for this dot. PROGRESS = dot that may move the line;
+   *  OPEN_ISSUE = qualitative ping at the then-current Y; MIXED = a timestamp
+   *  that combined both (rendered as PROGRESS). */
+  kind?: "PROGRESS" | "OPEN_ISSUE" | "MIXED";
   /** One entry per leaf task that pushed a snapshot at this timestamp.
    *  Lets the project-wide tooltip tell users *which* task moved the line
    *  when multiple tasks publish updates at the same moment. */
@@ -89,6 +97,7 @@ export type ActualPoint = {
     taskId: string;
     taskTitle: string;
     comment?: string;
+    commentType?: "PROGRESS" | "OPEN_ISSUE";
   }>;
   /** True for synthetic anchor points (start baseline, "now" tip) that the
    *  user didn't explicitly push. These don't need a tooltip. */
@@ -175,6 +184,13 @@ function leavesUnder(
  * outside the progress API (e.g. dragging a bar on the Gantt) wouldn't have
  * written a snapshot but should still be reflected in the "right now" tip.
  */
+function hasState(s: BurndownSnapshotInput): boolean {
+  // A snapshot "carries state" only when it reports progress or remaining
+  // hours. Pure OPEN_ISSUE notes have neither and should NOT move the burn
+  // line — they're pings, not progress readings.
+  return s.remainingEffort != null || s.progress != null;
+}
+
 function remainingAtLeaf(
   leaf: BurndownTaskInput,
   snaps: BurndownSnapshotInput[],
@@ -182,16 +198,13 @@ function remainingAtLeaf(
   nowMs: number,
 ): number {
   const E = effortOf(leaf);
+  const stateSnaps = snaps.filter(hasState);
 
   if (t === nowMs) {
-    // Prefer the explicit remaining field if the most recent snapshot carries
-    // one, otherwise derive from the leaf's live progress.
-    const latest = snaps.length ? snaps[snaps.length - 1] : null;
-    if (
-      latest &&
-      latest.remainingEffort != null &&
-      new Date(latest.createdAt).getTime() >= (snaps[0]?.createdAt ? 0 : 0)
-    ) {
+    // Prefer the explicit remaining field if the most recent state-bearing
+    // snapshot carries one, otherwise derive from the leaf's live progress.
+    const latest = stateSnaps.length ? stateSnaps[stateSnaps.length - 1] : null;
+    if (latest && latest.remainingEffort != null) {
       return Math.max(0, latest.remainingEffort);
     }
     const prog = clamp(leaf.progress, 0, 100);
@@ -199,13 +212,13 @@ function remainingAtLeaf(
   }
 
   let snap: BurndownSnapshotInput | null = null;
-  for (const s of snaps) {
+  for (const s of stateSnaps) {
     if (new Date(s.createdAt).getTime() > t) break;
     snap = s;
   }
   if (!snap) return E;
   if (snap.remainingEffort != null) return Math.max(0, snap.remainingEffort);
-  const prog = clamp(snap.progress, 0, 100);
+  const prog = clamp(snap.progress ?? 0, 0, 100);
   return Math.max(0, E * (1 - prog / 100));
 }
 
@@ -303,7 +316,20 @@ function buildSeriesForLeaves(
       taskId: leaf.id,
       taskTitle: leaf.title,
       comment: (snap.comment ?? "").trim() || undefined,
+      commentType: snap.commentType,
     }));
+    // Classify the dot: if every snapshot at this instant is an OPEN_ISSUE
+    // note, style it as a qualitative ping; if there's any progress reading
+    // mixed in, the dot belongs on the burn line.
+    const hasProgress = here.some(({ snap }) => hasState(snap));
+    const hasIssue = here.some(
+      ({ snap }) => snap.commentType === "OPEN_ISSUE",
+    );
+    const kind: "PROGRESS" | "OPEN_ISSUE" | "MIXED" = hasProgress
+      ? hasIssue
+        ? "MIXED"
+        : "PROGRESS"
+      : "OPEN_ISSUE";
     return {
       t,
       displayT: clamp(t, startMs, endMs),
@@ -312,6 +338,7 @@ function buildSeriesForLeaves(
       postEnd: t > endMs,
       comment: comment || undefined,
       sources,
+      kind,
     };
   });
 
@@ -645,39 +672,66 @@ export function BurndownChart({
           const cy = yOf(p.v);
           const baseR = compact ? 2.8 : 3.4;
           const isHovered = hoverIdx === i;
-          // Synthetic anchors (startMs baseline + "now" tip) render smaller
-          // and without hover so the user's real updates are visually dominant.
-          if (p.synthetic) {
-            return (
-              <circle
-                key={i}
-                cx={cx}
-                cy={cy}
-                r={baseR - 0.6}
-                fill="#ffffff"
-                stroke="rgb(90 95 223)"
-                strokeWidth={1.3}
-              />
-            );
-          }
-          const strokeColor = p.preStart || p.postEnd ? "#b45309" : "#ffffff";
+          // Generous invisible hit area so every ping is easy to grab —
+          // especially important where multiple dots cluster near the
+          // "today" line or the right edge of the panel.
+          const hitR = compact ? 10 : 12;
+          // OPEN_ISSUE pings are qualitative — render as an amber hollow
+          // marker so the eye can tell them apart from progress readings.
+          const isIssue = p.kind === "OPEN_ISSUE";
+          const fill = p.synthetic
+            ? "#ffffff"
+            : isIssue
+              ? "#ffffff"
+              : "rgb(90 95 223)";
+          const stroke = isIssue
+            ? "#b45309"
+            : p.preStart || p.postEnd
+              ? "#b45309"
+              : p.synthetic
+                ? "rgb(90 95 223)"
+                : "#ffffff";
+          const ringStroke = "rgb(90 95 223)";
+          const r = p.synthetic
+            ? baseR - 0.6
+            : isHovered
+              ? baseR + 2
+              : baseR;
+          const ariaLabel = (() => {
+            const head = `${new Date(p.t).toLocaleString()} — ${fmtHours(p.v)} remaining`;
+            if (p.synthetic) {
+              return p.t <= series.startMs + 1000
+                ? `Start baseline: ${fmtHours(p.v)}`
+                : `Today: ${fmtHours(p.v)} remaining`;
+            }
+            return p.comment ? `${head}: ${p.comment}` : head;
+          })();
           return (
             <g key={i}>
               <circle
                 cx={cx}
                 cy={cy}
-                r={isHovered ? baseR + 2 : baseR}
-                fill="rgb(90 95 223)"
-                stroke={strokeColor}
-                strokeWidth={isHovered ? 2 : 1.4}
-                style={{ cursor: "pointer", transition: "r 120ms ease" }}
+                r={r}
+                fill={fill}
+                stroke={p.synthetic ? ringStroke : stroke}
+                strokeWidth={
+                  p.synthetic ? 1.3 : isIssue ? 1.6 : isHovered ? 2 : 1.4
+                }
+                style={{ transition: "r 120ms ease" }}
+                pointerEvents="none"
+              />
+              {/* Transparent, larger hit-target. Sits on top so hover,
+                  focus, and click always land on *something* even when
+                  the visible dot is tiny or sits under the today line. */}
+              <circle
+                cx={cx}
+                cy={cy}
+                r={hitR}
+                fill="transparent"
                 tabIndex={0}
                 role="button"
-                aria-label={
-                  p.comment
-                    ? `Update on ${new Date(p.t).toLocaleString()}: ${p.comment}`
-                    : `Update on ${new Date(p.t).toLocaleString()}`
-                }
+                aria-label={ariaLabel}
+                style={{ cursor: "pointer", outline: "none" }}
                 onMouseEnter={() => setHoverIdx(i)}
                 onMouseLeave={() =>
                   setHoverIdx((h) => (h === i ? null : h))
@@ -690,13 +744,22 @@ export function BurndownChart({
               {/* Fallback native tip for keyboard users / no-JS. */}
               <title>
                 {(() => {
+                  if (p.synthetic) {
+                    return p.t <= series.startMs + 1000
+                      ? `Start baseline — ${fmtHours(p.v)} committed`
+                      : `Today — ${fmtHours(p.v)} remaining`;
+                  }
                   const head = `${new Date(p.t).toLocaleString()} — ${fmtHours(p.v)}`;
                   const srcs = p.sources ?? [];
                   const multiLeaf = series.leafCount > 1;
                   if (multiLeaf && srcs.length > 0) {
-                    const lines = srcs.map((s) =>
-                      s.comment ? `${s.taskTitle} — ${s.comment}` : s.taskTitle,
-                    );
+                    const lines = srcs.map((s) => {
+                      const tag =
+                        s.commentType === "OPEN_ISSUE" ? " [issue]" : "";
+                      return s.comment
+                        ? `${s.taskTitle}${tag} — ${s.comment}`
+                        : `${s.taskTitle}${tag}`;
+                    });
                     return head + "\n" + lines.join("\n");
                   }
                   return p.comment ? `${head}\n${p.comment}` : head;
@@ -706,9 +769,10 @@ export function BurndownChart({
           );
         })}
 
-        {/* today marker */}
+        {/* today marker — pointer-events off so it never steals hover
+            from dots sitting directly on or behind the red line. */}
         {todayInside && (
-          <g>
+          <g pointerEvents="none">
             <line
               x1={todayX}
               x2={todayX}
@@ -737,59 +801,85 @@ export function BurndownChart({
         {hoverIdx != null &&
           (() => {
             const p = series.actual[hoverIdx];
-            if (!p || p.synthetic) return null;
+            if (!p) return null;
             const cx = xOf(p.displayT);
             const cy = yOf(p.v);
             const bodyLines: string[] = [];
-            bodyLines.push(
-              `${fmtHours(p.v)} remaining · ${new Date(p.t).toLocaleString()}`,
-            );
-            if (p.preStart) {
+            // Synthetic anchors get a plain-English tip so the user always
+            // has context on every ping, even the auto-generated ones.
+            if (p.synthetic) {
+              const isStart = p.t <= series.startMs + 1000;
               bodyLines.push(
-                "Pushed before task start — plotted at the start date.",
+                isStart
+                  ? `Start baseline — ${fmtHours(p.v)} committed`
+                  : `Today — ${fmtHours(p.v)} remaining`,
               );
-            } else if (p.postEnd) {
               bodyLines.push(
-                "Pushed after task end — plotted at the end date.",
+                isStart
+                  ? "Auto anchor at the project start. Real updates appear as solid dots."
+                  : "Auto anchor at the current moment. Push a progress update to drop a new dot here.",
               );
-            }
-            // Attribution: which leaf task(s) pushed this update. Only
-            // meaningful when the series rolls up multiple leaves (the
-            // project/workstream view); a single-leaf series would just
-            // echo its own title, so we hide it there.
-            const sources = p.sources ?? [];
-            const multiLeaf = series.leafCount > 1;
-            if (multiLeaf && sources.length > 0) {
-              if (sources.length === 1) {
-                const src = sources[0];
-                const line = src.comment
-                  ? `${src.taskTitle} — ${src.comment}`
-                  : src.taskTitle;
-                bodyLines.push(line);
-              } else {
+            } else {
+              const kindTag =
+                p.kind === "OPEN_ISSUE"
+                  ? " (issue note)"
+                  : p.kind === "MIXED"
+                    ? " (progress + issue)"
+                    : "";
+              bodyLines.push(
+                `${fmtHours(p.v)} remaining${kindTag} · ${new Date(p.t).toLocaleString()}`,
+              );
+              if (p.preStart) {
                 bodyLines.push(
-                  `${sources.length} tasks updated at this time:`,
+                  "Pushed before task start — plotted at the start date.",
                 );
-                // Cap to 5 leaves so the tooltip stays within chart
-                // bounds even on an extremely busy timestamp; users
-                // can drill into the rest via the task drawer.
-                const MAX_LEAVES = 5;
-                for (const src of sources.slice(0, MAX_LEAVES)) {
-                  bodyLines.push(
-                    src.comment
-                      ? `• ${src.taskTitle} — ${src.comment}`
-                      : `• ${src.taskTitle}`,
-                  );
-                }
-                if (sources.length > MAX_LEAVES) {
-                  bodyLines.push(
-                    `…and ${sources.length - MAX_LEAVES} more`,
-                  );
-                }
+              } else if (p.postEnd) {
+                bodyLines.push(
+                  "Pushed after task end — plotted at the end date.",
+                );
               }
-            } else if (p.comment) {
-              // Single-leaf series: just the comment, no task echo.
-              bodyLines.push(p.comment);
+              // Attribution: which leaf task(s) pushed this update. Only
+              // meaningful when the series rolls up multiple leaves (the
+              // project/workstream view); a single-leaf series would just
+              // echo its own title, so we hide it there.
+              const sources = p.sources ?? [];
+              const multiLeaf = series.leafCount > 1;
+              if (multiLeaf && sources.length > 0) {
+                if (sources.length === 1) {
+                  const src = sources[0];
+                  const tag =
+                    src.commentType === "OPEN_ISSUE" ? " [issue]" : "";
+                  const line = src.comment
+                    ? `${src.taskTitle}${tag} — ${src.comment}`
+                    : `${src.taskTitle}${tag}`;
+                  bodyLines.push(line);
+                } else {
+                  bodyLines.push(
+                    `${sources.length} tasks updated at this time:`,
+                  );
+                  // Cap to 5 leaves so the tooltip stays within chart
+                  // bounds even on an extremely busy timestamp; users
+                  // can drill into the rest via the task drawer.
+                  const MAX_LEAVES = 5;
+                  for (const src of sources.slice(0, MAX_LEAVES)) {
+                    const tag =
+                      src.commentType === "OPEN_ISSUE" ? " [issue]" : "";
+                    bodyLines.push(
+                      src.comment
+                        ? `• ${src.taskTitle}${tag} — ${src.comment}`
+                        : `• ${src.taskTitle}${tag}`,
+                    );
+                  }
+                  if (sources.length > MAX_LEAVES) {
+                    bodyLines.push(
+                      `…and ${sources.length - MAX_LEAVES} more`,
+                    );
+                  }
+                }
+              } else if (p.comment) {
+                // Single-leaf series: just the comment, no task echo.
+                bodyLines.push(p.comment);
+              }
             }
 
             const tipW = compact ? 240 : 280;
@@ -860,6 +950,13 @@ export function BurndownChart({
             style={{ background: "rgb(90 95 223)" }}
           />
           Actual (from progress updates)
+        </span>
+        <span>
+          <span
+            className="burn-legend-dot burn-legend-dot--ring"
+            style={{ borderColor: "#b45309" }}
+          />
+          Issue note
         </span>
         {series.usesDefaultEffort && (
           <span className="burn-legend-note">

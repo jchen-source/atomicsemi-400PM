@@ -34,12 +34,16 @@ export default async function TasksPage() {
     }),
     prisma.dependency.findMany(),
     prisma.taskUpdate.findMany({
-      where: { commentType: "PROGRESS" },
+      // Pull every update type — PROGRESS readings move the burn line and
+      // OPEN_ISSUE notes show up as qualitative pings ("every update should
+      // have a ping" on the chart). The chart distinguishes them by kind.
+      where: { commentType: { in: ["PROGRESS", "OPEN_ISSUE"] } },
       orderBy: { createdAt: "asc" },
       select: {
         id: true,
         taskId: true,
         createdAt: true,
+        commentType: true,
         progress: true,
         remainingEffort: true,
         status: true,
@@ -241,18 +245,21 @@ export default async function TasksPage() {
       blocked: t.blocked,
     }));
 
-  const burnSnapshots: BurndownSnapshotInput[] = allSnapshots
-    .filter((u) => u.progress !== null)
-    .map((u) => ({
-      id: u.id,
-      taskId: u.taskId,
-      createdAt: u.createdAt.toISOString(),
-      progress: u.progress ?? 0,
-      remainingEffort: u.remainingEffort ?? null,
-      status: u.status ?? null,
-      health: (u.health as "green" | "yellow" | "red" | null) ?? null,
-      comment: u.comment ?? "",
-    }));
+  const burnSnapshots: BurndownSnapshotInput[] = allSnapshots.map((u) => ({
+    id: u.id,
+    taskId: u.taskId,
+    createdAt: u.createdAt.toISOString(),
+    commentType:
+      u.commentType === "OPEN_ISSUE" ? "OPEN_ISSUE" : "PROGRESS",
+    // Keep null when the update didn't touch progress; the chart uses null
+    // to skip the reading when computing Y so pure OPEN_ISSUE notes become
+    // pings at the then-current burn level instead of snapping it back up.
+    progress: u.progress,
+    remainingEffort: u.remainingEffort ?? null,
+    status: u.status ?? null,
+    health: (u.health as "green" | "yellow" | "red" | null) ?? null,
+    comment: u.comment ?? "",
+  }));
 
   return (
     <div className="roadmap-page space-y-3">

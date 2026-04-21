@@ -124,16 +124,22 @@ export default async function WorkstreamPage({
     }
   }
 
-  // Snapshots for every task in scope. One query; filtered to PROGRESS only
-  // so status-less ISSUE comments don't pollute the burndown/history.
+  // Snapshots for every task in scope. Pull both PROGRESS readings and
+  // OPEN_ISSUE notes — progress rows drive the burn line, issue notes
+  // become qualitative pings on the same chart so "every update has a
+  // ping" at a glance.
   const ids = [parent.id, ...descendants.map((d) => d.id)];
   const rawSnapshots = await prisma.taskUpdate.findMany({
-    where: { taskId: { in: ids }, commentType: "PROGRESS" },
+    where: {
+      taskId: { in: ids },
+      commentType: { in: ["PROGRESS", "OPEN_ISSUE"] },
+    },
     orderBy: { createdAt: "asc" },
     select: {
       id: true,
       taskId: true,
       createdAt: true,
+      commentType: true,
       comment: true,
       progress: true,
       remainingEffort: true,
@@ -159,31 +165,35 @@ export default async function WorkstreamPage({
       assignee: t.assignee,
       blocked: t.blocked,
     }));
-  const burnSnapshots: BurndownSnapshotInput[] = rawSnapshots
-    .filter((s) => s.progress !== null)
+  const burnSnapshots: BurndownSnapshotInput[] = rawSnapshots.map((s) => ({
+    id: s.id,
+    taskId: s.taskId,
+    createdAt: s.createdAt.toISOString(),
+    commentType:
+      s.commentType === "OPEN_ISSUE" ? "OPEN_ISSUE" : "PROGRESS",
+    progress: s.progress,
+    remainingEffort: s.remainingEffort ?? null,
+    status: s.status ?? null,
+    health: (s.health as "green" | "yellow" | "red" | null) ?? null,
+    comment: s.comment ?? "",
+  }));
+
+  // Display snapshots — carry the comment so the history dropdown can show
+  // it. Keep this to PROGRESS-only: the history panel tracks progress
+  // readings; OPEN_ISSUE notes live in their own Issues list.
+  const displaySnapshots: WorkstreamSnapshot[] = rawSnapshots
+    .filter((s) => s.commentType !== "OPEN_ISSUE")
     .map((s) => ({
       id: s.id,
       taskId: s.taskId,
       createdAt: s.createdAt.toISOString(),
+      comment: s.comment ?? "",
       progress: s.progress ?? 0,
       remainingEffort: s.remainingEffort ?? null,
       status: s.status ?? null,
+      blocked: s.blocked ?? null,
       health: (s.health as "green" | "yellow" | "red" | null) ?? null,
-      comment: s.comment ?? "",
     }));
-
-  // Display snapshots — carry the comment so the history dropdown can show it.
-  const displaySnapshots: WorkstreamSnapshot[] = rawSnapshots.map((s) => ({
-    id: s.id,
-    taskId: s.taskId,
-    createdAt: s.createdAt.toISOString(),
-    comment: s.comment ?? "",
-    progress: s.progress ?? 0,
-    remainingEffort: s.remainingEffort ?? null,
-    status: s.status ?? null,
-    blocked: s.blocked ?? null,
-    health: (s.health as "green" | "yellow" | "red" | null) ?? null,
-  }));
 
   const now = new Date();
 

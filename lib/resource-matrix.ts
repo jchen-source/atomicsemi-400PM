@@ -92,12 +92,21 @@ export function splitAssignees(
 /**
  * Build the per-person per-week hours matrix.
  *
- * Distribution rule:
- *   perDay = effortHours / durationInDays
+ * Distribution rule (business-day weighted):
+ *   businessDays = count of Mon–Fri dates in [startDate, endDate]
+ *   perDay = effortHours / businessDays
  *   perPersonPerDay = perDay * share(person)
  *     share comes from Task.allocations (percent/100) when present, else
  *     an even 1/N across the names found in assignee/resourceAllocated.
- *   ...distributed evenly across every day the task spans.
+ *   ...distributed across every business day the task spans. Weekends
+ *   inside the span carry 0 hours so a task that starts on Wed of week N
+ *   only deposits Wed/Thu/Fri load into that week — Sat/Sun contribute
+ *   nothing and the remaining effort rolls naturally into Mon-Fri of
+ *   week N+1 and beyond.
+ *
+ *   Falls back to calendar-day distribution when the task has zero
+ *   business days (e.g. a one-day task scheduled on a Saturday) so the
+ *   hours still surface somewhere instead of silently vanishing.
  *
  * Tasks with no assignees go into the "Unassigned" bucket so capacity
  * planning surfaces work that still needs an owner.
@@ -254,7 +263,21 @@ export function buildResourceMatrix({
     // Task days span [start, end] inclusive; use +1 day so a same-day
     // task still contributes one day of effort.
     const spanDays = Math.max(1, Math.round((endMs - startMs) / DAY_MS) + 1);
-    const perDay = effort / spanDays;
+
+    // Count business days (Mon-Fri) in the task span so effort is spread
+    // across realistic working time instead of evenly across weekends.
+    // If the task somehow has zero business days (e.g. a single-day task
+    // that lands on a Sunday), fall back to calendar-day spreading so the
+    // hours still show up somewhere rather than disappearing.
+    const firstDay = startOfDayUTC(new Date(startMs));
+    let businessDays = 0;
+    for (let i = 0; i < spanDays; i++) {
+      const dow = new Date(firstDay.getTime() + i * DAY_MS).getUTCDay();
+      if (dow !== 0 && dow !== 6) businessDays++;
+    }
+    const divisor = businessDays > 0 ? businessDays : spanDays;
+    const perDay = effort / divisor;
+    const spreadAcrossBusinessOnly = businessDays > 0;
 
     const resolved = resolveTargets(t);
     const targets =
@@ -262,12 +285,17 @@ export function buildResourceMatrix({
         ? [{ name: "__unassigned__", share: 1 }]
         : resolved;
 
-    // Walk each day in the task span that also falls inside our window and
-    // drop `perDay * share` into each assignee's week bucket.
-    const firstDay = startOfDayUTC(new Date(startMs));
+    // Walk each day in the task span that also falls inside our window
+    // and, when spreading business-only, only the Mon–Fri ones. This is
+    // what makes a task starting Wed of week N deposit only Wed/Thu/Fri
+    // into that week instead of smearing hours across Sat/Sun too.
     for (let i = 0; i < spanDays; i++) {
       const dayMs = firstDay.getTime() + i * DAY_MS;
       if (dayMs < windowStartMs || dayMs >= windowEndMs) continue;
+      if (spreadAcrossBusinessOnly) {
+        const dow = new Date(dayMs).getUTCDay();
+        if (dow === 0 || dow === 6) continue;
+      }
       const weekKey = isoDate(startOfWeekUTC(new Date(dayMs)));
       const weekIdx = weekIndexByKey.get(weekKey);
       if (weekIdx == null) continue;

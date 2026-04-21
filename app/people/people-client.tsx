@@ -289,8 +289,9 @@ export default function PeopleClient({
               </label>
             )}
             <span className="people-matrix-note">
-              Hours/week (Mon–Sun) · next {matrix.weekStarts.length} weeks ·
-              starting {formatWeekLabel(matrix.weekStarts[0])}
+              Hours/week (Mon–Sun, spread across Mon–Fri) · next{" "}
+              {matrix.weekStarts.length} weeks · starting{" "}
+              {formatWeekLabel(matrix.weekStarts[0])}
             </span>
           </div>
         </div>

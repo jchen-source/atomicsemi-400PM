@@ -251,6 +251,7 @@ export default function WorkstreamClient({
         id: newSnapshot.id,
         taskId: cardId,
         createdAt: newSnapshot.createdAt,
+        commentType: "PROGRESS",
         progress: newSnapshot.progress,
         remainingEffort: newSnapshot.remainingEffort,
         status: newSnapshot.status,

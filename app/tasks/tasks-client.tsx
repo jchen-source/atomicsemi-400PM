@@ -134,6 +134,36 @@ export default function TasksClient({
     [initialBurnSnapshots],
   );
 
+  // Passive auto-refresh: if a teammate pushes an update in another tab
+  // (or the same user toggles back after editing elsewhere), re-pull
+  // server data so the burndown chart picks up the new snapshots without
+  // requiring a manual reload. We only refresh when the tab is visible
+  // to keep background tabs idle.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      if (!cancelled && document.visibilityState === "visible") {
+        router.refresh();
+      }
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    const onFocus = () => refresh();
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onFocus);
+    // Gentle poll every 30s — cheap enough to stay live on the standup
+    // view without hammering Render. The server RSC response is cached
+    // per-request so this is a single PG round-trip per tick.
+    const id = window.setInterval(refresh, 30_000);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onFocus);
+      window.clearInterval(id);
+    };
+  }, [router]);
+
   const filterCtx: FilterContext = useMemo(() => {
     const map = new Map<string, Date[]>();
     for (const [k, v] of Object.entries(predEndDatesByDependent)) {
@@ -535,6 +565,7 @@ export default function TasksClient({
                     id: newSnapshot.id,
                     taskId: active.id,
                     createdAt: newSnapshot.createdAt,
+                    commentType: "PROGRESS",
                     progress: newSnapshot.progress ?? 0,
                     remainingEffort: newSnapshot.remainingEffort ?? null,
                     status: newSnapshot.status ?? null,

@@ -90,14 +90,23 @@ export type ActualPoint = {
    *  OPEN_ISSUE = qualitative ping at the then-current Y; MIXED = a timestamp
    *  that combined both (rendered as PROGRESS). */
   kind?: "PROGRESS" | "OPEN_ISSUE" | "MIXED";
+  /** Number of individual updates folded into this dot. Close-in-time
+   *  updates (same time bucket) are bundled so the chart stays legible. */
+  bundleCount?: number;
+  /** Earliest / latest real timestamps in the bundle. Used for the tooltip
+   *  head so users know the window the updates spanned. */
+  bundleStartT?: number;
+  bundleEndT?: number;
   /** One entry per leaf task that pushed a snapshot at this timestamp.
    *  Lets the project-wide tooltip tell users *which* task moved the line
-   *  when multiple tasks publish updates at the same moment. */
+   *  when multiple tasks publish updates at the same moment. Ordered
+   *  newest-first so the most recent activity shows at the top. */
   sources?: Array<{
     taskId: string;
     taskTitle: string;
     comment?: string;
     commentType?: "PROGRESS" | "OPEN_ISSUE";
+    at?: number;
   }>;
   /** True for synthetic anchor points (start baseline, "now" tip) that the
    *  user didn't explicitly push. These don't need a tooltip. */
@@ -271,58 +280,88 @@ function buildSeriesForLeaves(
     (l) => !(l.effortHours && l.effortHours > 0),
   );
 
-  // Collect every snapshot across all leaves in scope, then group by
-  // timestamp so one moment in time becomes one dot on the chart even
-  // if multiple leaves got updates in the same second. We also hold a
-  // parallel index back to the source leaf so each dot can say *which*
-  // task(s) caused it on the project-wide tooltip.
-  const perTime = new Map<
-    number,
-    Array<{ snap: BurndownSnapshotInput; leaf: BurndownTaskInput }>
-  >();
+  // Collect every snapshot across all leaves in scope. We key by a *time
+  // bucket* instead of by exact millisecond so close-in-time updates fold
+  // into a single dot on the chart — otherwise busy standup sessions leave
+  // a cluster of overlapping circles that nobody can hover individually.
+  //
+  // Bucket size is proportional to the chart's timeline: ~0.4% of the span,
+  // floored to 10 minutes and capped to 12 hours. That means short projects
+  // bundle finely while long roadmaps collapse same-day updates into one
+  // point without losing any comment (all comments surface in the tooltip).
+  const spanMs = Math.max(1, endMs - startMs);
+  const MIN_BUCKET = 10 * 60 * 1000; //  10 minutes
+  const MAX_BUCKET = 12 * 60 * 60 * 1000; //  12 hours
+  const bucketMs = Math.min(
+    MAX_BUCKET,
+    Math.max(MIN_BUCKET, Math.round(spanMs * 0.004)),
+  );
+
+  type Entry = { snap: BurndownSnapshotInput; leaf: BurndownTaskInput; ts: number };
+  const perBucket = new Map<number, Entry[]>();
   for (const l of leaves) {
     for (const s of snapshotsByTask.get(l.id) ?? []) {
       const ts = new Date(s.createdAt).getTime();
       if (ts > inputs.nowMs) continue; // never forecast into the future
-      const arr = perTime.get(ts) ?? [];
-      arr.push({ snap: s, leaf: l });
-      perTime.set(ts, arr);
+      const key = Math.floor(ts / bucketMs) * bucketMs;
+      const arr = perBucket.get(key) ?? [];
+      arr.push({ snap: s, leaf: l, ts });
+      perBucket.set(key, arr);
     }
   }
-  const timeline = [...perTime.keys()].sort((a, b) => a - b);
+  const bucketKeys = [...perBucket.keys()].sort((a, b) => a - b);
 
-  // One point per snapshot timestamp. v = sum of remaining across all leaves
-  // at that moment. displayT clamps into [startMs, endMs] so a snapshot
-  // pushed before the task officially starts still shows up at the chart's
-  // left edge — the real time is preserved in `t` for the hover tooltip.
-  const actual: ActualPoint[] = timeline.map((t) => {
+  // One ActualPoint per bucket. The dot sits at the latest ts in the
+  // bucket (so the line steps down exactly where the user's last update
+  // in that window landed), and every comment from the bucket is attached
+  // to `sources` so the tooltip can enumerate the contributing updates.
+  const actual: ActualPoint[] = bucketKeys.map((key) => {
+    const entries = (perBucket.get(key) ?? []).slice().sort(
+      (a, b) => a.ts - b.ts,
+    );
+    const firstTs = entries[0]?.ts ?? key;
+    const lastTs = entries[entries.length - 1]?.ts ?? key;
+
+    // Y is computed at the LAST update in the bucket — that's the state
+    // after everyone finished pushing in that window.
     let sum = 0;
     for (const l of leaves) {
       sum += remainingAtLeaf(
         l,
         snapshotsByTask.get(l.id) ?? [],
-        t,
+        lastTs,
         inputs.nowMs,
       );
     }
-    const here = perTime.get(t) ?? [];
-    // Only surface non-empty comments; when multiple leaves pushed at the
-    // exact same instant we concatenate so nothing gets lost.
-    const comment = here
-      .map(({ snap }) => (snap.comment ?? "").trim())
-      .filter(Boolean)
+
+    // Sources: newest first, so when the tooltip truncates to the top
+    // few, users see the most recent activity first. Dedupe per leaf
+    // within a bucket — if the same task was updated twice in a 10-min
+    // window, we surface its latest comment and drop the older one.
+    const newestByLeaf = new Map<string, Entry>();
+    for (const e of entries) {
+      newestByLeaf.set(e.leaf.id, e);
+    }
+    const sources = [...newestByLeaf.values()]
+      .sort((a, b) => b.ts - a.ts)
+      .map(({ snap, leaf, ts }) => ({
+        taskId: leaf.id,
+        taskTitle: leaf.title,
+        comment: (snap.comment ?? "").trim() || undefined,
+        commentType: snap.commentType,
+        at: ts,
+      }));
+
+    const comment = sources
+      .map((s) => s.comment)
+      .filter((c): c is string => Boolean(c))
       .join(" · ");
-    const sources = here.map(({ snap, leaf }) => ({
-      taskId: leaf.id,
-      taskTitle: leaf.title,
-      comment: (snap.comment ?? "").trim() || undefined,
-      commentType: snap.commentType,
-    }));
-    // Classify the dot: if every snapshot at this instant is an OPEN_ISSUE
-    // note, style it as a qualitative ping; if there's any progress reading
-    // mixed in, the dot belongs on the burn line.
-    const hasProgress = here.some(({ snap }) => hasState(snap));
-    const hasIssue = here.some(
+
+    // Classify: if any snapshot in the bucket carried state, the dot
+    // belongs on the burn line (PROGRESS or MIXED). Otherwise it's a
+    // qualitative ping (OPEN_ISSUE).
+    const hasProgress = entries.some(({ snap }) => hasState(snap));
+    const hasIssue = entries.some(
       ({ snap }) => snap.commentType === "OPEN_ISSUE",
     );
     const kind: "PROGRESS" | "OPEN_ISSUE" | "MIXED" = hasProgress
@@ -330,15 +369,19 @@ function buildSeriesForLeaves(
         ? "MIXED"
         : "PROGRESS"
       : "OPEN_ISSUE";
+
     return {
-      t,
-      displayT: clamp(t, startMs, endMs),
+      t: lastTs,
+      displayT: clamp(lastTs, startMs, endMs),
       v: sum,
-      preStart: t < startMs,
-      postEnd: t > endMs,
+      preStart: lastTs < startMs,
+      postEnd: lastTs > endMs,
       comment: comment || undefined,
       sources,
       kind,
+      bundleCount: entries.length,
+      bundleStartT: firstTs,
+      bundleEndT: lastTs,
     };
   });
 
@@ -534,6 +577,18 @@ export function BurndownChart({
   // near the cursor without going through a portal.
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
+  // Index of the most recent NON-synthetic dot. We light this one up
+  // with a gentle pulse so users see "here's where the last update
+  // landed" at a glance — very handy when polling/router.refresh drops
+  // a new point onto the chart without the user looking directly at it.
+  let latestRealIdx = -1;
+  for (let i = series.actual.length - 1; i >= 0; i--) {
+    if (!series.actual[i].synthetic) {
+      latestRealIdx = i;
+      break;
+    }
+  }
+
   const xOf = (t: number) =>
     pad.l +
     ((clamp(t, series.startMs, series.endMs) - series.startMs) / span) *
@@ -600,7 +655,35 @@ export function BurndownChart({
       </header>
 
       <svg viewBox={`0 0 ${W} ${H}`} className="burn-svg">
-        <rect x={0} y={0} width={W} height={H} fill="#ffffff" />
+        <defs>
+          {/* Soft gradient under the 'actual' line. Gives the chart some
+              visual weight without fighting the line itself. */}
+          <linearGradient id="burn-area-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgb(90, 95, 223)" stopOpacity="0.22" />
+            <stop offset="100%" stopColor="rgb(90, 95, 223)" stopOpacity="0" />
+          </linearGradient>
+          {/* Subtle background wash on the plot area — a hair warmer than
+              pure white so the gridlines read as gentle rules rather than
+              hard stripes on a stark canvas. */}
+          <linearGradient id="burn-plot-bg" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#fbfbfe" />
+            <stop offset="100%" stopColor="#f5f6fb" />
+          </linearGradient>
+          {/* Soft halo behind each dot. Sits under the fill so the dot
+              pops slightly off the page without looking heavy. */}
+          <filter id="burn-dot-glow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="1.4" />
+          </filter>
+        </defs>
+
+        <rect
+          x={pad.l - 2}
+          y={pad.t - 4}
+          width={innerW + 4}
+          height={innerH + 8}
+          rx={10}
+          fill="url(#burn-plot-bg)"
+        />
 
         {/* Y gridlines + hour labels */}
         {yTicks.map((v) => (
@@ -653,50 +736,68 @@ export function BurndownChart({
         <path
           d={idealD}
           fill="none"
-          stroke="#94a3b8"
-          strokeWidth={1.5}
-          strokeDasharray="5 4"
+          stroke="#9aa3b5"
+          strokeWidth={1.4}
+          strokeDasharray="5 5"
+          strokeLinecap="round"
+          opacity={0.85}
         />
+
+        {/* actual — gradient area under the line. Built by closing the
+            stepped path back down to the baseline so the fill hugs the
+            same silhouette as the stroke. */}
+        {(() => {
+          if (!series.actual.length) return null;
+          const last = series.actual[series.actual.length - 1];
+          const firstX = xOf(series.actual[0].displayT);
+          const lastX = xOf(last.displayT);
+          const baseY = yOf(0);
+          const areaD = `${actualD} L ${lastX} ${baseY} L ${firstX} ${baseY} Z`;
+          return <path d={areaD} fill="url(#burn-area-grad)" stroke="none" />;
+        })()}
 
         {/* actual line */}
         <path
           d={actualD}
           fill="none"
-          stroke="rgb(90 95 223)"
-          strokeWidth={2.2}
+          stroke="rgb(90, 95, 223)"
+          strokeWidth={2.4}
           strokeLinejoin="round"
           strokeLinecap="round"
         />
         {series.actual.map((p, i) => {
           const cx = xOf(p.displayT);
           const cy = yOf(p.v);
-          const baseR = compact ? 2.8 : 3.4;
+          const baseR = compact ? 3.0 : 3.6;
           const isHovered = hoverIdx === i;
           // Generous invisible hit area so every ping is easy to grab —
           // especially important where multiple dots cluster near the
           // "today" line or the right edge of the panel.
-          const hitR = compact ? 10 : 12;
+          const hitR = compact ? 11 : 13;
           // OPEN_ISSUE pings are qualitative — render as an amber hollow
           // marker so the eye can tell them apart from progress readings.
           const isIssue = p.kind === "OPEN_ISSUE";
+          const bundleN = p.bundleCount ?? 1;
+          // Bundled dots scale gently so the eye can see "more activity
+          // happened here" at a glance. Log-ish growth keeps a dot for 10
+          // updates from becoming a beach ball.
+          const bundleBoost = bundleN > 1 ? Math.min(2.4, Math.log2(bundleN) * 0.9) : 0;
           const fill = p.synthetic
             ? "#ffffff"
             : isIssue
               ? "#ffffff"
-              : "rgb(90 95 223)";
+              : "rgb(90, 95, 223)";
           const stroke = isIssue
             ? "#b45309"
             : p.preStart || p.postEnd
               ? "#b45309"
               : p.synthetic
-                ? "rgb(90 95 223)"
+                ? "rgb(90, 95, 223)"
                 : "#ffffff";
-          const ringStroke = "rgb(90 95 223)";
+          const ringStroke = "rgb(90, 95, 223)";
           const r = p.synthetic
             ? baseR - 0.6
-            : isHovered
-              ? baseR + 2
-              : baseR;
+            : (isHovered ? baseR + 2 : baseR) + bundleBoost;
           const ariaLabel = (() => {
             const head = `${new Date(p.t).toLocaleString()} — ${fmtHours(p.v)} remaining`;
             if (p.synthetic) {
@@ -704,10 +805,43 @@ export function BurndownChart({
                 ? `Start baseline: ${fmtHours(p.v)}`
                 : `Today: ${fmtHours(p.v)} remaining`;
             }
-            return p.comment ? `${head}: ${p.comment}` : head;
+            const bundleTail =
+              bundleN > 1 ? ` · ${bundleN} updates bundled` : "";
+            return p.comment
+              ? `${head}: ${p.comment}${bundleTail}`
+              : `${head}${bundleTail}`;
           })();
+          const isLatestReal = !p.synthetic && i === latestRealIdx;
           return (
             <g key={i}>
+              {/* Pulse ring on the most recent real update so the eye
+                  naturally lands on "what just happened" after a refresh. */}
+              {isLatestReal && (
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={r}
+                  fill="none"
+                  stroke={isIssue ? "#b45309" : "rgb(90, 95, 223)"}
+                  strokeWidth={1.4}
+                  opacity={0.65}
+                  pointerEvents="none"
+                  className="burn-dot-pulse"
+                />
+              )}
+              {/* Soft halo behind real dots so the eye picks them up
+                  against the gridlines without needing a heavy stroke. */}
+              {!p.synthetic && (
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={r + 3}
+                  fill={isIssue ? "#fde8cf" : "rgb(90, 95, 223)"}
+                  opacity={isHovered ? 0.35 : 0.18}
+                  filter="url(#burn-dot-glow)"
+                  pointerEvents="none"
+                />
+              )}
               <circle
                 cx={cx}
                 cy={cy}
@@ -717,9 +851,42 @@ export function BurndownChart({
                 strokeWidth={
                   p.synthetic ? 1.3 : isIssue ? 1.6 : isHovered ? 2 : 1.4
                 }
-                style={{ transition: "r 120ms ease" }}
+                style={{ transition: "r 140ms ease" }}
                 pointerEvents="none"
               />
+              {/* Bundle badge — a small number sitting inside a bundled
+                  PROGRESS/MIXED dot when it folds 2+ updates together.
+                  Renders white on the blue fill so it stays legible. */}
+              {!p.synthetic && !isIssue && bundleN > 1 && (
+                <text
+                  x={cx}
+                  y={cy + (compact ? 2.5 : 2.8)}
+                  textAnchor="middle"
+                  fontSize={compact ? 8.5 : 9.5}
+                  fontWeight={700}
+                  fill="#ffffff"
+                  pointerEvents="none"
+                  style={{ fontFamily: "system-ui, sans-serif" }}
+                >
+                  {bundleN > 9 ? "9+" : bundleN}
+                </text>
+              )}
+              {/* For bundled ISSUE-only dots, the same badge in amber on
+                  the hollow marker. */}
+              {!p.synthetic && isIssue && bundleN > 1 && (
+                <text
+                  x={cx}
+                  y={cy + (compact ? 2.5 : 2.8)}
+                  textAnchor="middle"
+                  fontSize={compact ? 8.5 : 9.5}
+                  fontWeight={700}
+                  fill="#b45309"
+                  pointerEvents="none"
+                  style={{ fontFamily: "system-ui, sans-serif" }}
+                >
+                  {bundleN > 9 ? "9+" : bundleN}
+                </text>
+              )}
               {/* Transparent, larger hit-target. Sits on top so hover,
                   focus, and click always land on *something* even when
                   the visible dot is tiny or sits under the today line. */}
@@ -770,7 +937,9 @@ export function BurndownChart({
         })}
 
         {/* today marker — pointer-events off so it never steals hover
-            from dots sitting directly on or behind the red line. */}
+            from dots sitting directly on or behind the red line. Label
+            sits in a soft pill so it reads as a UI chip rather than
+            floating text over the plot. */}
         {todayInside && (
           <g pointerEvents="none">
             <line
@@ -781,15 +950,30 @@ export function BurndownChart({
               stroke="#ef4444"
               strokeDasharray="3 3"
               strokeWidth={1}
+              opacity={0.9}
             />
-            <text
-              x={todayX + 4}
-              y={pad.t + 10}
-              fontSize="10"
-              fill="#ef4444"
-            >
-              today
-            </text>
+            <g transform={`translate(${todayX + 6}, ${pad.t + 2})`}>
+              <rect
+                x={0}
+                y={0}
+                width={36}
+                height={14}
+                rx={7}
+                fill="#ef4444"
+                opacity={0.95}
+              />
+              <text
+                x={18}
+                y={10}
+                fontSize="9.5"
+                textAnchor="middle"
+                fontWeight={600}
+                fill="#ffffff"
+                style={{ fontFamily: "system-ui, sans-serif" }}
+              >
+                TODAY
+              </text>
+            </g>
           </g>
         )}
 
@@ -826,9 +1010,25 @@ export function BurndownChart({
                   : p.kind === "MIXED"
                     ? " (progress + issue)"
                     : "";
-              bodyLines.push(
-                `${fmtHours(p.v)} remaining${kindTag} · ${new Date(p.t).toLocaleString()}`,
-              );
+              const bundleN = p.bundleCount ?? 1;
+              if (bundleN > 1 && p.bundleStartT && p.bundleEndT) {
+                const startStr = new Date(p.bundleStartT).toLocaleString();
+                const endStr = new Date(p.bundleEndT).toLocaleString();
+                // If start/end are effectively the same moment, show a
+                // single timestamp; otherwise show a short range.
+                const sameInstant =
+                  Math.abs(p.bundleEndT - p.bundleStartT) < 60_000;
+                bodyLines.push(
+                  `${fmtHours(p.v)} remaining${kindTag} · ${bundleN} updates`,
+                );
+                bodyLines.push(
+                  sameInstant ? endStr : `${startStr} → ${endStr}`,
+                );
+              } else {
+                bodyLines.push(
+                  `${fmtHours(p.v)} remaining${kindTag} · ${new Date(p.t).toLocaleString()}`,
+                );
+              }
               if (p.preStart) {
                 bodyLines.push(
                   "Pushed before task start — plotted at the start date.",

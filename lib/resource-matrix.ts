@@ -79,6 +79,19 @@ export function splitAssignees(
  *   ...distributed evenly across every day the task spans.
  * Tasks with no assignees go into the "Unassigned" bucket so capacity
  * planning surfaces work that still needs an owner.
+ *
+ * Double-counting guard (leaves-only + inherit):
+ *   Only LEAF tasks (rows with no children in the fetched set)
+ *   contribute hours. Parent rows carry a rollup of their children's
+ *   effortHours (see lib/schedule.ts#rollupProgress) — counting both
+ *   would allocate the same 40 h to, say, Alice twice if she's
+ *   assigned to both the workstream and one of its tasks.
+ *
+ *   If a leaf has no assignee(s) of its own, we walk up the parent
+ *   chain and attribute its hours to the nearest ancestor that does.
+ *   That lets teams that assign at the workstream level keep working
+ *   without explicitly tagging every leaf. If no ancestor has one
+ *   either, the hours fall into the "Unassigned" bucket as before.
  */
 export function buildResourceMatrix({
   tasks,
@@ -127,9 +140,41 @@ export function buildResourceMatrix({
   const windowStartMs = weekStartDate.getTime();
   const windowEndMs = windowStartMs + weeks * 7 * DAY_MS;
 
+  // Precompute hierarchy lookups so the main loop can detect leaves
+  // and walk up to the nearest assigned ancestor without nested scans.
+  const tasksById = new Map<string, Task>();
+  const hasChildren = new Set<string>();
+  for (const t of tasks) {
+    tasksById.set(t.id, t);
+    if (t.parentId) hasChildren.add(t.parentId);
+  }
+  const resolveTargets = (t: Task): string[] => {
+    // Walk parentId chain, bounded to the depth of the fetched set,
+    // collecting the first ancestor (including `t` itself) with any
+    // assignee. `seen` guards against cycles from stale data.
+    const seen = new Set<string>();
+    let cursor: Task | undefined = t;
+    while (cursor && !seen.has(cursor.id)) {
+      seen.add(cursor.id);
+      const names = splitAssignees(cursor.assignee, cursor.resourceAllocated);
+      if (names.length > 0) {
+        return names.map((raw) => {
+          const canon = canonicalRoster.get(raw.toLowerCase());
+          return canon ?? raw;
+        });
+      }
+      if (!cursor.parentId) break;
+      cursor = tasksById.get(cursor.parentId);
+    }
+    return [];
+  };
+
   for (const t of tasks) {
     // Skip ISSUE layer and 0-effort tasks; they don't consume capacity.
     if ((t.type ?? "TASK") === "ISSUE") continue;
+    // Skip non-leaf rows. Their effortHours is a rollup of their
+    // children's hours; counting both double-allocates capacity.
+    if (hasChildren.has(t.id)) continue;
     const effort = Number(t.effortHours ?? 0);
     if (!effort || effort <= 0) continue;
 
@@ -142,14 +187,8 @@ export function buildResourceMatrix({
     const spanDays = Math.max(1, Math.round((endMs - startMs) / DAY_MS) + 1);
     const perDay = effort / spanDays;
 
-    const assignees = splitAssignees(t.assignee, t.resourceAllocated);
-    const targets: string[] =
-      assignees.length === 0
-        ? ["__unassigned__"]
-        : assignees.map((raw) => {
-            const canon = canonicalRoster.get(raw.toLowerCase());
-            return canon ?? raw;
-          });
+    const resolved = resolveTargets(t);
+    const targets: string[] = resolved.length === 0 ? ["__unassigned__"] : resolved;
     const perPersonPerDay = perDay / targets.length;
 
     // Walk each day in the task span that also falls inside our window and

@@ -1131,8 +1131,20 @@ body {
 .tasks-title {
   min-width: 0;
   overflow: hidden;
+  /* Mirror the Gantt sidebar: long task names wrap onto a second line
+     instead of truncating with an ellipsis, so the column can stay its
+     current width while the full name still reads out. Anything over
+     two lines still clamps with "…" so rows can't run away vertically,
+     and very long unbroken tokens break cleanly so they don't push the
+     title column wider than the grid allocates for it. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .tasks-chevron {

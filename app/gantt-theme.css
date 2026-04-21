@@ -1644,9 +1644,22 @@
      to a single click, not just the text characters. */
   flex: 1 1 auto;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   min-width: 0;
+  /* Allow the label to wrap to a second line instead of truncating with
+     an ellipsis — the Gantt row is 56px tall, which leaves room for
+     roughly two lines of 12.5px/1.3 text. Longer names still clamp at
+     two lines (via `-webkit-line-clamp`) and fall back to an ellipsis
+     rather than blowing out the row height or overflowing into the
+     adjacent columns. `break-word` keeps very long unbroken tokens
+     (e.g. URLs or product codes) from pushing the column wider. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  text-overflow: ellipsis;
   /* Match the Start / End / Depends-on meta cells (11px, tabular, muted)
      but bumped up a touch so the task name still reads as the primary
      label in the row. */

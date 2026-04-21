@@ -607,7 +607,8 @@ body {
 }
 
 .people-matrix-table .col-week {
-  min-width: 64px;
+  min-width: 92px;
+  white-space: nowrap;
 }
 
 .people-matrix-table .col-total {

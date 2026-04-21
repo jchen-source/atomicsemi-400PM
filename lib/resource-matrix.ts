@@ -334,3 +334,48 @@ export function formatWeekLabel(iso: string): string {
     timeZone: "UTC",
   });
 }
+
+/**
+ * Render a Monday-based week-start ISO date as an unambiguous range,
+ * e.g. "Apr 20 – 26" or "Apr 27 – May 3" when the week spans a month
+ * boundary. The column header in /people was showing only the Monday,
+ * which looked like a single-day label — users read "Apr 20" and
+ * assumed hours charged to it meant work scheduled on the 20th itself,
+ * not anywhere in the Mon-Sun window.
+ */
+export function formatWeekRangeLabel(iso: string): string {
+  const start = new Date(iso + "T00:00:00Z");
+  const end = new Date(start.getTime() + 6 * DAY_MS);
+  const startMonth = start.toLocaleDateString("en-US", {
+    month: "short",
+    timeZone: "UTC",
+  });
+  const endMonth = end.toLocaleDateString("en-US", {
+    month: "short",
+    timeZone: "UTC",
+  });
+  const startDay = start.getUTCDate();
+  const endDay = end.getUTCDate();
+  if (startMonth === endMonth) {
+    return `${startMonth} ${startDay} – ${endDay}`;
+  }
+  return `${startMonth} ${startDay} – ${endMonth} ${endDay}`;
+}
+
+/**
+ * Long form of {@link formatWeekRangeLabel} with explicit Mon / Sun
+ * anchors for the hover tooltip. Keeps the visible column header
+ * compact while still letting a curious user confirm the full window.
+ */
+export function formatWeekRangeTooltip(iso: string): string {
+  const start = new Date(iso + "T00:00:00Z");
+  const end = new Date(start.getTime() + 6 * DAY_MS);
+  const fmt = (d: Date) =>
+    d.toLocaleDateString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
+  return `${fmt(start)} – ${fmt(end)}`;
+}

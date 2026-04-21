@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import {
   buildResourceMatrix,
   formatWeekLabel,
+  formatWeekRangeLabel,
+  formatWeekRangeTooltip,
   type MatrixTask,
   type ResourceMatrix,
 } from "@/lib/resource-matrix";
@@ -287,8 +289,8 @@ export default function PeopleClient({
               </label>
             )}
             <span className="people-matrix-note">
-              Hours/week · next {matrix.weekStarts.length} weeks · starting{" "}
-              {formatWeekLabel(matrix.weekStarts[0])}
+              Hours/week (Mon–Sun) · next {matrix.weekStarts.length} weeks ·
+              starting {formatWeekLabel(matrix.weekStarts[0])}
             </span>
           </div>
         </div>
@@ -298,9 +300,13 @@ export default function PeopleClient({
               <tr>
                 <th className="col-name">Contributor</th>
                 {matrix.weekStarts.map((w) => (
-                  <th key={w} className="col-week">
+                  <th
+                    key={w}
+                    className="col-week"
+                    title={formatWeekRangeTooltip(w)}
+                  >
                     <span className="col-week-label">
-                      {formatWeekLabel(w)}
+                      {formatWeekRangeLabel(w)}
                     </span>
                   </th>
                 ))}

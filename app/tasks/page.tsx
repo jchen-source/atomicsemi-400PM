@@ -363,12 +363,24 @@ function parseAllocationsJSON(
 function deriveRowType(
   type: string,
   depth: number,
-  hasChildren: boolean,
+  _hasChildren: boolean,
 ): TaskRow["rowType"] {
+  // Classification is strictly hierarchy-based so a row's label matches
+  // where it lives in the tree, not whether it happens to have been
+  // broken down yet. Previously an un-decomposed Workstream (depth 1 with
+  // no children) was labelled "Task", which made the /tasks list read
+  // like a flat list of tasks even when several rows were really empty
+  // workstreams. Using depth alone keeps the label honest.
+  //
+  // Canonical depth layout for this app:
+  //   0 = Program         (EPIC-typed rows always land here too)
+  //   1 = Workstream
+  //   2 = Task
+  //   3+ = Subtask
   if (type === "EPIC" && depth === 0) return "program";
-  if (depth === 0) return hasChildren ? "program" : "task";
-  if (depth === 1) return hasChildren ? "workstream" : "task";
-  if (depth === 2) return hasChildren ? "task" : "task";
+  if (depth <= 0) return "program";
+  if (depth === 1) return "workstream";
+  if (depth === 2) return "task";
   return "subtask";
 }
 

@@ -1,4 +1,23 @@
-import type { Task } from "@prisma/client";
+/**
+ * Narrow, serializable input for the matrix builder.
+ *
+ * Prisma `Task` rows upcast into this automatically; client code that
+ * only has serialized task data (dates as ISO strings) can also call
+ * directly. We accept `Date | string` on both date fields so JSON
+ * payloads don't need a hydration pass before getting to us.
+ */
+export type MatrixTask = {
+  id: string;
+  title: string;
+  parentId: string | null;
+  startDate: Date | string;
+  endDate: Date | string;
+  effortHours: number | null;
+  assignee: string | null;
+  resourceAllocated: string | null;
+  allocations?: string | null;
+  type?: string | null;
+};
 
 export type AssignmentSource = {
   taskId: string;
@@ -101,7 +120,7 @@ export function buildResourceMatrix({
   windowStart,
   weeks,
 }: {
-  tasks: Task[];
+  tasks: MatrixTask[];
   roster: string[];
   windowStart: Date;
   weeks: number;
@@ -144,7 +163,7 @@ export function buildResourceMatrix({
 
   // Precompute hierarchy lookups so the main loop can detect leaves
   // and walk up to the nearest assigned ancestor without nested scans.
-  const tasksById = new Map<string, Task>();
+  const tasksById = new Map<string, MatrixTask>();
   const hasChildren = new Set<string>();
   for (const t of tasks) {
     tasksById.set(t.id, t);
@@ -161,12 +180,11 @@ export function buildResourceMatrix({
   const canonOf = (raw: string): string =>
     canonicalRoster.get(raw.toLowerCase()) ?? raw;
 
-  const targetsFromTask = (cursor: Task): Target[] | null => {
+  const targetsFromTask = (cursor: MatrixTask): Target[] | null => {
     // Explicit percent split wins. We accept the JSON column as-is but
     // defensively guard against malformed rows so one bad record doesn't
     // tank the whole matrix.
-    const raw = (cursor as Task & { allocations?: string | null })
-      .allocations;
+    const raw = cursor.allocations ?? null;
     if (raw) {
       try {
         const parsed = JSON.parse(raw) as Array<{
@@ -198,12 +216,12 @@ export function buildResourceMatrix({
     return names.map((n) => ({ name: canonOf(n), share }));
   };
 
-  const resolveTargets = (t: Task): Target[] => {
+  const resolveTargets = (t: MatrixTask): Target[] => {
     // Walk parentId chain, bounded to the depth of the fetched set,
     // returning the first ancestor (including `t` itself) that has any
     // form of assignment. `seen` guards against cycles from stale data.
     const seen = new Set<string>();
-    let cursor: Task | undefined = t;
+    let cursor: MatrixTask | undefined = t;
     while (cursor && !seen.has(cursor.id)) {
       seen.add(cursor.id);
       const targets = targetsFromTask(cursor);
@@ -223,8 +241,14 @@ export function buildResourceMatrix({
     const effort = Number(t.effortHours ?? 0);
     if (!effort || effort <= 0) continue;
 
-    const startMs = new Date(t.startDate).getTime();
-    const endMs = new Date(t.endDate).getTime();
+    const startMs =
+      t.startDate instanceof Date
+        ? t.startDate.getTime()
+        : new Date(t.startDate).getTime();
+    const endMs =
+      t.endDate instanceof Date
+        ? t.endDate.getTime()
+        : new Date(t.endDate).getTime();
     if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) continue;
 
     // Task days span [start, end] inclusive; use +1 day so a same-day

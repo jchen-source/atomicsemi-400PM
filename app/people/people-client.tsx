@@ -1,8 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { formatWeekLabel, type ResourceMatrix } from "@/lib/resource-matrix";
+import {
+  buildResourceMatrix,
+  formatWeekLabel,
+  type MatrixTask,
+  type ResourceMatrix,
+} from "@/lib/resource-matrix";
 
 type Person = {
   id: string;
@@ -13,16 +18,79 @@ type Person = {
 
 export default function PeopleClient({
   people,
-  matrix,
+  matrix: initialMatrix,
+  tasks,
+  programs,
+  roster,
+  windowStartISO,
+  weeks,
 }: {
   people: Person[];
   matrix: ResourceMatrix;
+  tasks: MatrixTask[];
+  programs: Array<{ id: string; title: string }>;
+  roster: string[];
+  windowStartISO: string;
+  weeks: number;
 }) {
   const router = useRouter();
   const [newName, setNewName] = useState("");
   const [newRole, setNewRole] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Program filter — "all" means every program feeds the matrix (the
+  // server-rendered `initialMatrix`). Specific ids rescope client-side
+  // so switching programs is instant. Persisted to localStorage so it
+  // survives navigation between tabs.
+  const [programId, setProgramId] = useState<string>("all");
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const saved = window.localStorage.getItem("people.programId");
+    if (saved) setProgramId(saved);
+  }, []);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("people.programId", programId);
+  }, [programId]);
+  useEffect(() => {
+    if (
+      programId !== "all" &&
+      programs.length > 0 &&
+      !programs.some((p) => p.id === programId)
+    ) {
+      setProgramId("all");
+    }
+  }, [programId, programs]);
+
+  // Recompute the matrix locally when a specific program is selected.
+  // "All programs" reuses the server matrix as-is so there's no extra
+  // work for the common case.
+  const matrix: ResourceMatrix = useMemo(() => {
+    if (programId === "all") return initialMatrix;
+    const scope = new Set<string>([programId]);
+    const kidsByParent = new Map<string | null, MatrixTask[]>();
+    for (const t of tasks) {
+      const arr = kidsByParent.get(t.parentId) ?? [];
+      arr.push(t);
+      kidsByParent.set(t.parentId, arr);
+    }
+    const stack = [programId];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      for (const kid of kidsByParent.get(cur) ?? []) {
+        if (scope.has(kid.id)) continue;
+        scope.add(kid.id);
+        stack.push(kid.id);
+      }
+    }
+    return buildResourceMatrix({
+      tasks: tasks.filter((t) => scope.has(t.id)),
+      roster,
+      windowStart: new Date(windowStartISO),
+      weeks,
+    });
+  }, [programId, initialMatrix, tasks, roster, windowStartISO, weeks]);
 
   const totals = useMemo(() => {
     const cols = matrix.weekStarts.map(() => 0);
@@ -180,10 +248,49 @@ export default function PeopleClient({
       <section className="people-matrix">
         <div className="people-matrix-header">
           <h2 className="people-section-title">Weekly load</h2>
-          <span className="people-matrix-note">
-            Hours/week · next {matrix.weekStarts.length} weeks · starting{" "}
-            {formatWeekLabel(matrix.weekStarts[0])}
-          </span>
+          <div className="people-matrix-controls">
+            {programs.length > 1 && (
+              <label
+                className={
+                  "people-programpicker" +
+                  (programId !== "all"
+                    ? " people-programpicker--active"
+                    : "")
+                }
+                title="Scope the matrix to a single program"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  width="14"
+                  height="14"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                >
+                  <path d="M3 7h18M3 12h18M3 17h18" />
+                </svg>
+                <select
+                  value={programId}
+                  onChange={(e) => setProgramId(e.target.value)}
+                  aria-label="Filter by program"
+                >
+                  <option value="all">All programs</option>
+                  {programs.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <span className="people-matrix-note">
+              Hours/week · next {matrix.weekStarts.length} weeks · starting{" "}
+              {formatWeekLabel(matrix.weekStarts[0])}
+            </span>
+          </div>
         </div>
         <div className="people-matrix-scroll">
           <table className="people-matrix-table">

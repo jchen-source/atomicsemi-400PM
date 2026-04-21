@@ -109,6 +109,19 @@ export default function TasksClient({
   const [view, setView] = useState<SavedView>("all");
   const [dateRange, setDateRange] = useState<DateRange>("any");
   const [search, setSearch] = useState("");
+  // "all" = every program, otherwise the id of a specific program (depth-0
+  // row) that scopes the table, burndown, and drawer. Persisted to
+  // localStorage so navigating away and back doesn't lose your context.
+  const [programId, setProgramId] = useState<string>("all");
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const saved = window.localStorage.getItem("tasks.programId");
+    if (saved) setProgramId(saved);
+  }, []);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("tasks.programId", programId);
+  }, [programId]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [activeId, setActiveId] = useState<string | null>(null);
   const [snapshots, setSnapshots] = useState<TaskSnapshot[]>([]);
@@ -237,10 +250,56 @@ export default function TasksClient({
     return m;
   }, [rows]);
 
+  // Programs (depth-0 rows) drive the top-level dropdown. Sorted by title
+  // so the menu is stable as rows reshuffle.
+  const programOptions = useMemo(() => {
+    return rows
+      .filter((r) => r.rowType === "program")
+      .map((r) => ({ id: r.id, title: r.title }))
+      .sort((a, b) => a.title.localeCompare(b.title));
+  }, [rows]);
+
+  // If the saved programId no longer exists (program deleted, or initial
+  // hydration before programs loaded), snap back to "all" so the table
+  // doesn't silently hide everything.
+  useEffect(() => {
+    if (
+      programId !== "all" &&
+      programOptions.length > 0 &&
+      !programOptions.some((p) => p.id === programId)
+    ) {
+      setProgramId("all");
+    }
+  }, [programId, programOptions]);
+
+  // Set of task ids inside the active program: the program row itself
+  // plus every descendant. `null` means "no scoping" (All programs).
+  const programScopeIds = useMemo<Set<string> | null>(() => {
+    if (programId === "all") return null;
+    const kidsByParent = new Map<string | null, TaskRow[]>();
+    for (const r of rows) {
+      const arr = kidsByParent.get(r.parentId) ?? [];
+      arr.push(r);
+      kidsByParent.set(r.parentId, arr);
+    }
+    const out = new Set<string>([programId]);
+    const stack = [programId];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      for (const kid of kidsByParent.get(cur) ?? []) {
+        if (out.has(kid.id)) continue;
+        out.add(kid.id);
+        stack.push(kid.id);
+      }
+    }
+    return out;
+  }, [programId, rows]);
+
   const visibleIds = useMemo(() => {
     const intersection = new Set<string>();
     for (const id of matchingIds) {
       if (searchIds && !searchIds.has(id)) continue;
+      if (programScopeIds && !programScopeIds.has(id)) continue;
       intersection.add(id);
     }
     // Add ancestors so filtered descendants render in context.
@@ -254,7 +313,7 @@ export default function TasksClient({
       }
     }
     return withAncestors;
-  }, [matchingIds, searchIds, rowById]);
+  }, [matchingIds, searchIds, rowById, programScopeIds]);
 
   // Apply collapsed folders: if any ancestor is collapsed, hide this row.
   const isHiddenByCollapse = useCallback(
@@ -350,13 +409,22 @@ export default function TasksClient({
 
   // Project-wide burndown: every leaf task in the hierarchy rolled into one
   // effort-weighted curve. Recomputes on every local state change so a save
-  // updates the strip instantly.
+  // updates the strip instantly. When a specific program is selected the
+  // strip narrows to that program's rollup so the user sees the curve that
+  // matches the rest of the page.
   const projectSeries = useMemo(() => {
-    return buildProjectSeries(
-      { tasks: burnTasks, snapshots: burnSnapshots, nowMs: Date.now() },
-      "All programs",
-    );
-  }, [burnTasks, burnSnapshots]);
+    const inputs = {
+      tasks: burnTasks,
+      snapshots: burnSnapshots,
+      nowMs: Date.now(),
+    };
+    if (programId !== "all") {
+      const title =
+        programOptions.find((p) => p.id === programId)?.title ?? "Program";
+      return buildParentSeries(programId, inputs, title);
+    }
+    return buildProjectSeries(inputs, "All programs");
+  }, [burnTasks, burnSnapshots, programId, programOptions]);
 
   // Keep table "Rem" aligned with the burndown's live math.
   const remainingNowByTaskId = useMemo(
@@ -433,6 +501,9 @@ export default function TasksClient({
         dateRange={dateRange}
         setDateRange={setDateRange}
         rangeCount={matchingIds.size}
+        programId={programId}
+        setProgramId={setProgramId}
+        programOptions={programOptions}
       />
 
       {projectSeries && (
@@ -685,6 +756,9 @@ function FilterBar({
   dateRange,
   setDateRange,
   rangeCount,
+  programId,
+  setProgramId,
+  programOptions,
 }: {
   view: SavedView;
   setView: (v: SavedView) => void;
@@ -696,9 +770,49 @@ function FilterBar({
   /** Total matches under the current (view ∩ dateRange) filter — shown
    *  inline with the dropdown so the user gets a quick confirmation. */
   rangeCount: number;
+  /** Active program id, or "all" for every program. */
+  programId: string;
+  setProgramId: (id: string) => void;
+  /** Depth-0 rows available for selection. */
+  programOptions: Array<{ id: string; title: string }>;
 }) {
   return (
     <div className="tasks-filterbar">
+      {programOptions.length > 1 && (
+        <label
+          className={
+            "tasks-rangepicker tasks-programpicker" +
+            (programId !== "all" ? " tasks-rangepicker--active" : "")
+          }
+          title="Scope the list, burndown, and drawer to a single program"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="14"
+            height="14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+          >
+            <path d="M3 7h18M3 12h18M3 17h18" />
+          </svg>
+          <select
+            value={programId}
+            onChange={(e) => setProgramId(e.target.value)}
+            aria-label="Filter by program"
+          >
+            <option value="all">All programs</option>
+            {programOptions.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.title}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <div className="tasks-filter-chips">
         {SAVED_VIEWS.map((v) => {
           // Severity chips get a tint hook in CSS so they telegraph urgency

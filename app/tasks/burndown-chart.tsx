@@ -1100,13 +1100,11 @@ export function BurndownChart({
                     : `${src.taskTitle}${tag}`;
                   bodyLines.push(line);
                 } else {
-                  bodyLines.push(
-                    `${sources.length} tasks updated at this time:`,
-                  );
-                  // Cap to 5 leaves so the tooltip stays within chart
-                  // bounds even on an extremely busy timestamp; users
-                  // can drill into the rest via the task drawer.
-                  const MAX_LEAVES = 5;
+                  bodyLines.push(`${sources.length} tasks updated:`);
+                  // Cap so the tooltip never swallows the plot. Users can
+                  // drill into any of the rest via the task drawer — the
+                  // burndown doesn't need to be the full audit log.
+                  const MAX_LEAVES = 3;
                   for (const src of sources.slice(0, MAX_LEAVES)) {
                     const tag =
                       src.commentType === "OPEN_ISSUE" ? " [issue]" : "";
@@ -1118,7 +1116,7 @@ export function BurndownChart({
                   }
                   if (sources.length > MAX_LEAVES) {
                     bodyLines.push(
-                      `…and ${sources.length - MAX_LEAVES} more`,
+                      `+${sources.length - MAX_LEAVES} more`,
                     );
                   }
                 }
@@ -1128,12 +1126,16 @@ export function BurndownChart({
               }
             }
 
-            const tipW = compact ? 240 : 280;
-            const lineH = compact ? 16 : 18;
+            // Keep the tip tight so it doesn't swallow the plot. Big
+            // chart sizing in particular used to rival the chart itself;
+            // we now match the compact variant and only go a hair wider
+            // to accommodate the longer per-task attribution lines.
+            const tipW = compact ? 220 : 240;
+            const lineH = compact ? 14 : 15;
             // Rough character-wrap estimate so multi-line comments get room.
             const charsPerLine = Math.max(
               20,
-              Math.floor((tipW - 20) / (compact ? 6.2 : 6.8)),
+              Math.floor((tipW - 18) / (compact ? 5.6 : 5.9)),
             );
             let visualLines = 0;
             for (const line of bodyLines) {
@@ -1142,7 +1144,7 @@ export function BurndownChart({
                 Math.ceil(line.length / charsPerLine),
               );
             }
-            const tipH = 16 + visualLines * lineH;
+            const tipH = 12 + visualLines * lineH;
 
             // Prefer ABOVE the dot so the user's update form underneath
             // the chart never gets blocked. Flip below only when there's

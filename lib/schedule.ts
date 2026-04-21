@@ -160,6 +160,41 @@ export async function rollupProgress(
     const parentProgress =
       totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
 
+    // Derive status from the children too — otherwise a program sits at
+    // "To do" forever even as its workstreams finish, which is exactly
+    // the bug users complain about on /tasks. Rules, conservative:
+    //   - All real (non-ISSUE) children DONE  → DONE
+    //   - Any real child is non-zero progress → IN_PROGRESS
+    //   - Otherwise                           → leave existing status
+    // We deliberately don't auto-BLOCK a parent from one blocked child
+    // — that's noisy on big programs. Users can still set BLOCKED
+    // explicitly on a parent row and we won't overwrite it unless the
+    // rollup decides DONE (which is the only state "stronger" than
+    // blocked here).
+    const parentFromParent = await tx.task.findUnique({
+      where: { id: node.parentId },
+    });
+    const nonIssueKids = spanSiblings;
+    const allDone =
+      nonIssueKids.length > 0 &&
+      nonIssueKids.every(
+        (s) => s.status === "DONE" || s.progress >= 100,
+      );
+    const anyActive = nonIssueKids.some(
+      (s) => s.progress > 0 || s.status === "IN_PROGRESS" || s.status === "DONE",
+    );
+    const currentStatus = parentFromParent?.status ?? "TODO";
+    let nextStatus: string = currentStatus;
+    if (allDone) {
+      nextStatus = "DONE";
+    } else if (anyActive && currentStatus === "TODO") {
+      nextStatus = "IN_PROGRESS";
+    } else if (currentStatus === "DONE" && !allDone) {
+      // A child got reopened — walk the parent back to IN_PROGRESS so
+      // the status can't lie about the program being finished.
+      nextStatus = "IN_PROGRESS";
+    }
+
     // When there are no non-issue children, don't clobber the parent's dates
     // with garbage — just leave the existing span.
     const hasSpan = Number.isFinite(minStart) && Number.isFinite(maxEnd);
@@ -172,6 +207,7 @@ export async function rollupProgress(
       where: { id: node.parentId },
       data: {
         progress: parentProgress,
+        status: nextStatus,
         startDate: nextStart,
         endDate: nextEnd,
         effortHours: nextEffort,

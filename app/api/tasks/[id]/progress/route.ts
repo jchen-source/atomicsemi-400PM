@@ -94,14 +94,34 @@ export async function POST(req: Request, ctx: RouteCtx) {
   }
 
   // Merge patch → effective task for health calc.
-  const nextStatus =
-    input.status ??
-    // Blocking through the toggle should promote status if the user left
-    // status alone. This keeps the filter chips and the drawer in sync.
-    (input.blocked === true && existing.status !== "BLOCKED"
-      ? "BLOCKED"
-      : existing.status);
+  //
+  // Status auto-promotion rules when the client didn't explicitly set a
+  // status (most pushes from the standup form don't — the user just drags
+  // the slider):
+  //   - Blocked toggle flipped on  → BLOCKED (keeps filter chips in sync)
+  //   - New progress reads 100%    → DONE
+  //   - New progress > 0 from TODO → IN_PROGRESS  (<-- the "if there's a
+  //     percentage increase, flip it off of TODO" behavior users expect)
+  //   - Otherwise                  → keep existing
+  // A leaf finishing via the slider without the user touching the status
+  // cell is the common case, so we have to infer here or the master list
+  // keeps showing "To do" for rows that are clearly in flight.
   const nextBlocked = input.blocked ?? existing.blocked;
+  const desiredProgress = input.progress ?? existing.progress;
+  const nextStatus: typeof existing.status = (() => {
+    if (input.status) return input.status;
+    if (input.blocked === true && existing.status !== "BLOCKED") {
+      return "BLOCKED";
+    }
+    if (existing.status === "BLOCKED" && nextBlocked) {
+      return "BLOCKED";
+    }
+    if (desiredProgress >= 100) return "DONE";
+    if (desiredProgress > 0 && existing.status === "TODO") {
+      return "IN_PROGRESS";
+    }
+    return existing.status;
+  })();
   const nextProgress =
     input.progress ??
     (nextStatus === "DONE" ? 100 : existing.progress);
@@ -208,7 +228,6 @@ export async function POST(req: Request, ctx: RouteCtx) {
     revalidatePath("/");
     revalidatePath("/tasks");
     revalidatePath(`/tasks/${id}`);
-    revalidatePath("/open-issues");
   } catch {
     // revalidatePath is a no-op outside of a request lifecycle; swallow so
     // tests / background jobs don't trip on it.

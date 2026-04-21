@@ -804,8 +804,9 @@ body {
   top: 0;
   z-index: 5;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   padding: 6px 2px;
   background: #ffffff;
@@ -816,6 +817,13 @@ body {
   flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
+  /* Claim the middle of the filter row, but if the row is narrower than
+     ~320px the whole chip group wraps onto its own line instead of
+     collapsing into a vertical stack between the program picker and the
+     date/search controls. That's what was happening at IDE-split widths
+     like the 1024px screenshot the chips used to squeeze into a ~100px
+     column and look like a single-file list. */
+  flex: 1 1 320px;
 }
 
 .tasks-chip {

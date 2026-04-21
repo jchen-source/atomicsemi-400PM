@@ -91,7 +91,7 @@ export default function PeopleClient({
     <div className="people-page">
       <header className="people-header">
         <div>
-          <h1 className="people-title">People</h1>
+          <h1 className="people-title">Resource Matrix</h1>
           <p className="people-subtitle">
             Individual contributors and weekly resource loading. Effort on
             each task is split evenly across its days and its assigned

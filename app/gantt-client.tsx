@@ -5227,6 +5227,16 @@ function TodayOverlay({
   frameRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const [tick, setTick] = useState(0);
+  // Last successfully-computed placement. Used as a fallback when a
+  // mid-render DOM snapshot briefly fails the compute (no bars yet,
+  // 0-width anchor, area detached), which was causing the red line
+  // to flicker every time SVAR mutated the bar styles during hover,
+  // scroll, or re-render.
+  const lastPlacementRef = useRef<{
+    xInArea: number;
+    areaHeight: number;
+    areaEl: HTMLElement;
+  } | null>(null);
 
   useLayoutEffect(() => {
     const frame = frameRef.current;
@@ -5244,11 +5254,15 @@ function TodayOverlay({
     const ro = new ResizeObserver(schedule);
     ro.observe(frame);
 
+    // Narrow the MutationObserver: we care about bars being ADDED or
+    // REMOVED (childList) — not about SVAR thrashing inline styles on
+    // hover/focus, which fires hundreds of mutations a second and
+    // used to drive the today-line to flicker as each frame briefly
+    // lost an anchor. Bar position changes are already covered by the
+    // ResizeObserver + scroll listener.
     const mo = new MutationObserver(schedule);
     mo.observe(frame, {
       subtree: true,
-      attributes: true,
-      attributeFilter: ["style", "class", "transform"],
       childList: true,
     });
 
@@ -5341,34 +5355,52 @@ function TodayOverlay({
     const xInArea = anchorLeftInArea + (todayMs - anchorStart) / msPerPx;
 
     const contentWidth = Math.max(areaRect.width, area.scrollWidth || 0);
-    if (xInArea < -2 || xInArea > contentWidth + 2) return null;
+    if (xInArea < -2 || xInArea > contentWidth + 2) {
+      // Today is genuinely outside the chart window — clear the
+      // cache so we don't keep painting a stale line.
+      lastPlacementRef.current = null;
+      return null;
+    }
 
-    return {
+    const next = {
       xInArea,
       areaHeight: area.scrollHeight || area.offsetHeight || areaRect.height,
       areaEl: area,
     };
+    lastPlacementRef.current = next;
+    return next;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, tasks]);
+
+  // When a compute returns null mid-render (no bars this frame, anchor
+  // briefly detached, etc.) keep the last known-good placement so the
+  // line doesn't flicker. We only fall back if the cached area is still
+  // connected to the DOM — otherwise it's truly invalid.
+  const effective =
+    placement ??
+    (lastPlacementRef.current &&
+    lastPlacementRef.current.areaEl.isConnected
+      ? lastPlacementRef.current
+      : null);
 
   // Render the line as a child of `.wx-area` via a portal. That makes
   // `left: X` live in the area's own content coordinate system, which
   // scrolls naturally with the timeline without any math on our side.
-  if (!placement) return null;
+  if (!effective) return null;
   return createPortal(
     <div
       className="today-overlay"
       aria-hidden="false"
       style={{
-        left: placement.xInArea,
+        left: effective.xInArea,
         top: 0,
-        height: placement.areaHeight,
+        height: effective.areaHeight,
       }}
     >
       <span className="today-overlay__tick" aria-hidden="true" />
       <span className="today-overlay__label">Today</span>
     </div>,
-    placement.areaEl,
+    effective.areaEl,
   );
 }
 

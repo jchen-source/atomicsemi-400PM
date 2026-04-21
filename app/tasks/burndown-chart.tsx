@@ -82,6 +82,14 @@ export type ActualPoint = {
   postEnd: boolean;
   /** Optional comment pushed alongside this snapshot. */
   comment?: string;
+  /** One entry per leaf task that pushed a snapshot at this timestamp.
+   *  Lets the project-wide tooltip tell users *which* task moved the line
+   *  when multiple tasks publish updates at the same moment. */
+  sources?: Array<{
+    taskId: string;
+    taskTitle: string;
+    comment?: string;
+  }>;
   /** True for synthetic anchor points (start baseline, "now" tip) that the
    *  user didn't explicitly push. These don't need a tooltip. */
   synthetic?: boolean;
@@ -250,17 +258,21 @@ function buildSeriesForLeaves(
     (l) => !(l.effortHours && l.effortHours > 0),
   );
 
-  // Collect every snapshot across all leaves in scope, dedupe per
-  // (taskId, createdAt), then group by timestamp so one moment in time
-  // becomes one dot on the chart even if multiple leaves got updates
-  // in the same second.
-  const perTime = new Map<number, BurndownSnapshotInput[]>();
+  // Collect every snapshot across all leaves in scope, then group by
+  // timestamp so one moment in time becomes one dot on the chart even
+  // if multiple leaves got updates in the same second. We also hold a
+  // parallel index back to the source leaf so each dot can say *which*
+  // task(s) caused it on the project-wide tooltip.
+  const perTime = new Map<
+    number,
+    Array<{ snap: BurndownSnapshotInput; leaf: BurndownTaskInput }>
+  >();
   for (const l of leaves) {
     for (const s of snapshotsByTask.get(l.id) ?? []) {
       const ts = new Date(s.createdAt).getTime();
       if (ts > inputs.nowMs) continue; // never forecast into the future
       const arr = perTime.get(ts) ?? [];
-      arr.push(s);
+      arr.push({ snap: s, leaf: l });
       perTime.set(ts, arr);
     }
   }
@@ -280,13 +292,18 @@ function buildSeriesForLeaves(
         inputs.nowMs,
       );
     }
-    const snapsHere = perTime.get(t) ?? [];
+    const here = perTime.get(t) ?? [];
     // Only surface non-empty comments; when multiple leaves pushed at the
     // exact same instant we concatenate so nothing gets lost.
-    const comment = snapsHere
-      .map((s) => (s.comment ?? "").trim())
+    const comment = here
+      .map(({ snap }) => (snap.comment ?? "").trim())
       .filter(Boolean)
       .join(" · ");
+    const sources = here.map(({ snap, leaf }) => ({
+      taskId: leaf.id,
+      taskTitle: leaf.title,
+      comment: (snap.comment ?? "").trim() || undefined,
+    }));
     return {
       t,
       displayT: clamp(t, startMs, endMs),
@@ -294,6 +311,7 @@ function buildSeriesForLeaves(
       preStart: t < startMs,
       postEnd: t > endMs,
       comment: comment || undefined,
+      sources,
     };
   });
 
@@ -671,7 +689,18 @@ export function BurndownChart({
               />
               {/* Fallback native tip for keyboard users / no-JS. */}
               <title>
-                {`${new Date(p.t).toLocaleString()} — ${fmtHours(p.v)}${p.comment ? "\n" + p.comment : ""}`}
+                {(() => {
+                  const head = `${new Date(p.t).toLocaleString()} — ${fmtHours(p.v)}`;
+                  const srcs = p.sources ?? [];
+                  const multiLeaf = series.leafCount > 1;
+                  if (multiLeaf && srcs.length > 0) {
+                    const lines = srcs.map((s) =>
+                      s.comment ? `${s.taskTitle} — ${s.comment}` : s.taskTitle,
+                    );
+                    return head + "\n" + lines.join("\n");
+                  }
+                  return p.comment ? `${head}\n${p.comment}` : head;
+                })()}
               </title>
             </g>
           );
@@ -724,7 +753,44 @@ export function BurndownChart({
                 "Pushed after task end — plotted at the end date.",
               );
             }
-            if (p.comment) bodyLines.push(p.comment);
+            // Attribution: which leaf task(s) pushed this update. Only
+            // meaningful when the series rolls up multiple leaves (the
+            // project/workstream view); a single-leaf series would just
+            // echo its own title, so we hide it there.
+            const sources = p.sources ?? [];
+            const multiLeaf = series.leafCount > 1;
+            if (multiLeaf && sources.length > 0) {
+              if (sources.length === 1) {
+                const src = sources[0];
+                const line = src.comment
+                  ? `${src.taskTitle} — ${src.comment}`
+                  : src.taskTitle;
+                bodyLines.push(line);
+              } else {
+                bodyLines.push(
+                  `${sources.length} tasks updated at this time:`,
+                );
+                // Cap to 5 leaves so the tooltip stays within chart
+                // bounds even on an extremely busy timestamp; users
+                // can drill into the rest via the task drawer.
+                const MAX_LEAVES = 5;
+                for (const src of sources.slice(0, MAX_LEAVES)) {
+                  bodyLines.push(
+                    src.comment
+                      ? `• ${src.taskTitle} — ${src.comment}`
+                      : `• ${src.taskTitle}`,
+                  );
+                }
+                if (sources.length > MAX_LEAVES) {
+                  bodyLines.push(
+                    `…and ${sources.length - MAX_LEAVES} more`,
+                  );
+                }
+              }
+            } else if (p.comment) {
+              // Single-leaf series: just the comment, no task echo.
+              bodyLines.push(p.comment);
+            }
 
             const tipW = compact ? 240 : 280;
             const lineH = compact ? 16 : 18;

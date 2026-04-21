@@ -4501,7 +4501,11 @@ export default function GanttClient({
           <HierarchyOverlay tasks={tasks} frameRef={frameRef} />
         ) : null}
         {tasks.length > 0 ? (
-          <TodayOverlay tasks={tasks} frameRef={frameRef} />
+          <TodayOverlay
+            tasks={tasks}
+            frameRef={frameRef}
+            dateRange={dateRange}
+          />
         ) : null}
       </div>
       {depEditorTaskId && (
@@ -5279,9 +5283,15 @@ function HierarchyOverlay({
 function TodayOverlay({
   tasks,
   frameRef,
+  dateRange,
 }: {
   tasks: GanttTaskInput[];
   frameRef: React.RefObject<HTMLDivElement | null>;
+  /** The chart's configured start/end — same values passed to SVAR's
+   *  Gantt `start`/`end` props. Used as the authoritative source for
+   *  placement when no bars have rendered yet, so the red Today line
+   *  survives the async SVAR mount on a cold refresh. */
+  dateRange: { start: Date; end: Date } | null;
 }) {
   const [tick, setTick] = useState(0);
   // Last successfully-computed placement. Used as a fallback when a
@@ -5337,6 +5347,19 @@ function TodayOverlay({
       ).getTime() - now.getTime();
     const timer = window.setTimeout(schedule, msUntilMidnight + 1000);
 
+    // Retry tail: SVAR mounts via a dynamic() import (ssr:false), so on
+    // a cold refresh the `.wx-area` element may not exist yet when our
+    // first few schedule() ticks fire. The MutationObserver catches
+    // *child additions* but can miss the moment SVAR sets scrollWidth
+    // on an already-existing area element via an inline-style flip
+    // (which we intentionally don't subscribe to, because doing so
+    // caused severe flicker when SVAR thrashed bar styles on hover).
+    // Fire a short retry tail after mount so placement reliably
+    // converges even if every observer missed the relevant mutation.
+    const retryTimers = [16, 50, 150, 400, 1000, 2500].map((ms) =>
+      window.setTimeout(schedule, ms),
+    );
+
     schedule();
     return () => {
       cancelAnimationFrame(raf);
@@ -5345,6 +5368,7 @@ function TodayOverlay({
       frame.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", schedule);
       window.clearTimeout(timer);
+      for (const t of retryTimers) window.clearTimeout(t);
     };
   }, [frameRef]);
 
@@ -5352,13 +5376,15 @@ function TodayOverlay({
     const frame = frameRef.current;
     if (!frame) return null;
 
-    // Anchor to the widest rendered bar we can find, so pixels-per-ms
-    // is as precise as possible. Skip unplaced ghosts (0 width). We
-    // also derive the "area" (positioning reference) by walking up
-    // from a bar to its nearest `.wx-area` ancestor — this is the
-    // content-width container the bars actually live in, which is
-    // different from the viewport-width wrapper SVAR also renders as
-    // `.wx-area`. Using the inner one means `left: x` lives in the
+    const todayMs = Date.now();
+
+    // ---- Strategy 1: anchor to the widest rendered bar we can find,
+    // so pixels-per-ms is as precise as possible. Skip unplaced ghosts
+    // (0 width). We also derive the "area" (positioning reference) by
+    // walking up from a bar to its nearest `.wx-area` ancestor — this
+    // is the content-width container the bars actually live in, which
+    // is different from the viewport-width wrapper SVAR also renders
+    // as `.wx-area`. Using the inner one means `left: x` lives in the
     // same coordinate system the bars use, so the line scrolls with
     // the timeline instead of being clipped to the visible viewport.
     let anchorEl: HTMLElement | null = null;
@@ -5385,33 +5411,53 @@ function TodayOverlay({
       const a = el.closest(".wx-area") as HTMLElement | null;
       if (a) area = a;
     }
-    if (!anchorEl || !area) {
-      // Fallback: no bars yet (empty state / still rendering). Pick
-      // the inner `.wx-area` inside `.wx-chart` if present, so at
-      // least the node resolution is correct when bars do appear.
+
+    // ---- Strategy 2: no usable bar yet — locate the inner `.wx-area`
+    // directly. SVAR sets its scrollWidth based on the `start`/`end`
+    // props we pass, which match our `dateRange`, so we can map today
+    // linearly into that width without needing any bar.
+    if (!area) {
       area =
         (frame.querySelector(".wx-chart .wx-area") as HTMLElement | null) ??
         (frame.querySelector(".wx-area") as HTMLElement | null);
-      if (!anchorEl || !area) return null;
+    }
+    if (!area) return null;
+
+    const areaRect = area.getBoundingClientRect();
+    const contentWidth = Math.max(areaRect.width, area.scrollWidth || 0);
+    if (contentWidth <= 0) return null;
+
+    let xInArea: number | null = null;
+
+    if (anchorEl) {
+      // `.wx-area` is *inside* the horizontally-scrolling `.wx-chart`
+      // but is not itself scrollable — its rendered box is the full
+      // content width. That means `aRect.left - areaRect.left` is the
+      // anchor's offset in content coordinates and stays constant
+      // across scroll, so our computed x also lives in content coords.
+      const aRect = anchorEl.getBoundingClientRect();
+      const msPerPx = (anchorEnd - anchorStart) / aRect.width;
+      if (Number.isFinite(msPerPx) && msPerPx > 0) {
+        const anchorLeftInArea = aRect.left - areaRect.left;
+        xInArea = anchorLeftInArea + (todayMs - anchorStart) / msPerPx;
+      }
     }
 
-    // `.wx-area` is *inside* the horizontally-scrolling `.wx-chart`
-    // but is not itself scrollable — its rendered box is the full
-    // content width. That means `aRect.left - areaRect.left` is the
-    // anchor's offset in content coordinates and stays constant
-    // across scroll, so our computed x also lives in content coords.
-    // `areaRect.width` is the full timeline width (not viewport),
-    // so the bounds check only hides when today is outside the
-    // entire chart — which dateRange explicitly pads to include.
-    const areaRect = area.getBoundingClientRect();
-    const aRect = anchorEl.getBoundingClientRect();
-    const msPerPx = (anchorEnd - anchorStart) / aRect.width;
-    if (!Number.isFinite(msPerPx) || msPerPx <= 0) return null;
-    const anchorLeftInArea = aRect.left - areaRect.left;
-    const todayMs = Date.now();
-    const xInArea = anchorLeftInArea + (todayMs - anchorStart) / msPerPx;
+    if (xInArea == null && dateRange) {
+      // Bar-less fallback: interpolate today linearly across the
+      // chart's configured date range. This is the path that fires
+      // on a cold refresh before bars have mounted, and it's why
+      // the red line now shows up immediately instead of waiting
+      // for SVAR to paint its first bar.
+      const span = dateRange.end.getTime() - dateRange.start.getTime();
+      if (span > 0) {
+        const frac = (todayMs - dateRange.start.getTime()) / span;
+        xInArea = frac * contentWidth;
+      }
+    }
 
-    const contentWidth = Math.max(areaRect.width, area.scrollWidth || 0);
+    if (xInArea == null) return null;
+
     if (xInArea < -2 || xInArea > contentWidth + 2) {
       // Today is genuinely outside the chart window — clear the
       // cache so we don't keep painting a stale line.
@@ -5427,7 +5473,7 @@ function TodayOverlay({
     lastPlacementRef.current = next;
     return next;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick, tasks]);
+  }, [tick, tasks, dateRange]);
 
   // When a compute returns null mid-render (no bars this frame, anchor
   // briefly detached, etc.) keep the last known-good placement so the

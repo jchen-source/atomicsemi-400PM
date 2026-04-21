@@ -173,6 +173,60 @@
   margin: 0 2px;
 }
 
+/* Toolbar toggle for the red "Today" line. Pill-shaped so it reads as
+   a stateful switch next to the zoom group; red accent when on so the
+   state is legible at a glance. */
+.gantt-today-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid rgb(var(--border));
+  background: #ffffff;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease;
+}
+.gantt-today-toggle:hover {
+  color: #0f172a;
+  border-color: #cbd5e1;
+}
+.gantt-today-toggle.is-active {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
+  box-shadow: 0 1px 2px rgba(239, 68, 68, 0.12);
+}
+.gantt-today-toggle-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  box-shadow: 0 0 0 2px #ffffff;
+  transition: background 120ms ease;
+}
+.gantt-today-toggle.is-active .gantt-today-toggle-dot {
+  background: #ef4444;
+}
+
+/* Fallback today line rendered directly on `.wx-chart` when the rich
+   SVAR anchor-based placement can't resolve. A hair more translucent
+   so it's visually distinguishable from the precise overlay — but the
+   toggle always lands *some* line on the screen. */
+.today-overlay--fallback {
+  border-left-style: dashed;
+  opacity: 0.9;
+}
+
 /* Notion-style filter menu (toolbar button + floating popover). */
 .gantt-filter {
   position: relative;

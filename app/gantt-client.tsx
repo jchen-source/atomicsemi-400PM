@@ -318,6 +318,28 @@ export default function GanttClient({
     return pickZoomForSpanDays((maxMs - minMs) / 86_400_000);
   });
   const [dark, setDark] = useState(false);
+  // "Today" red line toggle. Persisted so a user who turns it off
+  // doesn't see it snap back on after a router.refresh() or a hard
+  // reload. Default true so new visitors get the line.
+  const [showToday, setShowToday] = useState<boolean>(true);
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem("gantt.showToday");
+      if (stored === "0" || stored === "1") {
+        setShowToday(stored === "1");
+      }
+    } catch {
+      // localStorage can throw in private mode / sandboxed iframes —
+      // just fall through with the default.
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("gantt.showToday", showToday ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [showToday]);
   const [depEditorTaskId, setDepEditorTaskId] = useState<string | null>(null);
   const [depEditorQuery, setDepEditorQuery] = useState("");
   const [depEditorSelected, setDepEditorSelected] = useState<string[]>([]);
@@ -4213,6 +4235,27 @@ export default function GanttClient({
         <div className="gantt-controls-divider" aria-hidden />
         <button
           type="button"
+          onClick={() => setShowToday((v) => !v)}
+          className={
+            "gantt-today-toggle" +
+            (showToday ? " is-active" : "")
+          }
+          aria-pressed={showToday}
+          title={
+            showToday
+              ? "Hide the red today line"
+              : "Show the red today line"
+          }
+        >
+          <span
+            className="gantt-today-toggle-dot"
+            aria-hidden
+          />
+          Today
+        </button>
+        <div className="gantt-controls-divider" aria-hidden />
+        <button
+          type="button"
           onClick={() => void undoLastRef.current()}
           className="gantt-undo-btn"
           disabled={undoStackRef.current.length === 0}
@@ -4500,7 +4543,7 @@ export default function GanttClient({
         {tasks.length > 0 ? (
           <HierarchyOverlay tasks={tasks} frameRef={frameRef} />
         ) : null}
-        {tasks.length > 0 ? (
+        {tasks.length > 0 && showToday ? (
           <TodayOverlay
             tasks={tasks}
             frameRef={frameRef}
@@ -5524,22 +5567,103 @@ function TodayOverlay({
   // Render the line as a child of `.wx-area` via a portal. That makes
   // `left: X` live in the area's own content coordinate system, which
   // scrolls naturally with the timeline without any math on our side.
-  if (!effective) return null;
+  if (effective) {
+    return createPortal(
+      <div
+        className="today-overlay"
+        aria-hidden="false"
+        style={{
+          left: effective.xInArea,
+          top: 0,
+          height: effective.areaHeight,
+        }}
+      >
+        <span className="today-overlay__tick" aria-hidden="true" />
+        <span className="today-overlay__label">Today</span>
+      </div>,
+      effective.areaEl,
+    );
+  }
+
+  // Guaranteed-visible fallback: if the rich placement failed (SVAR
+  // hasn't exposed `.wx-area` yet, its dimensions are still zero, or
+  // something about this environment's DOM keeps our anchor math from
+  // converging), we still render a red line so a user who toggled the
+  // control ON sees *something*.
+  //
+  // We portal into `.wx-chart` so the line lives over the timeline
+  // pane instead of crossing the table, and interpolate today's
+  // position linearly across the chart's configured date range using
+  // the chart's rendered pixel width. This fallback is rough (doesn't
+  // scroll with the timeline, ignores zoom-mid-chart bar widths) but
+  // it beats the alternative of an invisible line.
+  return <TodayOverlayFallback frameRef={frameRef} dateRange={dateRange} />;
+}
+
+function TodayOverlayFallback({
+  frameRef,
+  dateRange,
+}: {
+  frameRef: React.RefObject<HTMLDivElement | null>;
+  dateRange: { start: Date; end: Date } | null;
+}) {
+  const [tick, setTick] = useState(0);
+  useLayoutEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const ro = new ResizeObserver(() => setTick((t) => t + 1));
+    ro.observe(frame);
+    const id = window.setInterval(() => setTick((t) => t + 1), 1000);
+    const onResize = () => setTick((t) => t + 1);
+    window.addEventListener("resize", onResize);
+    return () => {
+      ro.disconnect();
+      window.clearInterval(id);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [frameRef]);
+
+  const placement = useMemo(() => {
+    const frame = frameRef.current;
+    if (!frame || !dateRange) return null;
+    // Prefer the SVAR chart pane so the line hovers over the timeline
+    // only. Fall back to the frame if SVAR hasn't mounted.
+    const chart = (frame.querySelector(".wx-chart") as HTMLElement | null) ??
+      frame;
+    const chartRect = chart.getBoundingClientRect();
+    const width = chartRect.width;
+    if (width <= 0) return null;
+    const span = dateRange.end.getTime() - dateRange.start.getTime();
+    if (span <= 0) return null;
+    const frac = (Date.now() - dateRange.start.getTime()) / span;
+    if (frac < -0.02 || frac > 1.02) return null;
+    const x = clamp(frac * width, 0, width);
+    return { host: chart, x, height: chart.scrollHeight || chart.offsetHeight || chartRect.height };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, dateRange]);
+
+  if (!placement) return null;
   return createPortal(
     <div
-      className="today-overlay"
+      className="today-overlay today-overlay--fallback"
       aria-hidden="false"
       style={{
-        left: effective.xInArea,
+        left: placement.x,
         top: 0,
-        height: effective.areaHeight,
+        height: placement.height,
       }}
     >
       <span className="today-overlay__tick" aria-hidden="true" />
       <span className="today-overlay__label">Today</span>
     </div>,
-    effective.areaEl,
+    placement.host,
   );
+}
+
+// Tiny local clamp helper for the fallback — copied here so we don't
+// have to thread a shared util through this file.
+function clamp(n: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, n));
 }
 
 // Parse a `YYYY-MM-DD` string from a native date input into a Date at

@@ -1476,7 +1476,16 @@ export default function GanttClient({
     const urgency = urgencyById.get(id) ?? data?.urgency ?? "medium";
     const health = healthByIdRef.current.get(id);
     const pct = Math.max(0, Math.min(100, Number(data?.progress ?? 0)));
-    const overdue = data?.end ? isOverdue(data.end, pct) : false;
+    // Dates shown in the hover tooltip must track the same source of truth
+    // as the bar-quick-editor and the grid Start/End cells, otherwise the
+    // tooltip can drift by a day when SVAR internally snaps `data.start`
+    // / `data.end` during drag/reschedule/zoom. Read from
+    // `knownTaskState` (seeded from the server `tasks` prop and updated
+    // on every commit) so all three surfaces always agree.
+    const canonical = knownTaskState.current.get(id);
+    const tipStart = canonical ? new Date(canonical.startMs) : data?.start;
+    const tipEnd = canonical ? new Date(canonical.endMs) : data?.end;
+    const overdue = tipEnd ? isOverdue(tipEnd, pct) : false;
     const childCount = childCountByIdRef.current.get(id) ?? 0;
 
     // Color by hierarchy LEVEL, not "has children". Previously a
@@ -1716,11 +1725,11 @@ export default function GanttClient({
                   </div>
                   <div>
                     <dt>Start</dt>
-                    <dd>{fmtTipDate(data?.start)}</dd>
+                    <dd>{fmtTipDate(tipStart)}</dd>
                   </div>
                   <div>
                     <dt>End</dt>
-                    <dd>{fmtTipDate(data?.end)}</dd>
+                    <dd>{fmtTipDate(tipEnd)}</dd>
                   </div>
                   {owner && (
                     <div>

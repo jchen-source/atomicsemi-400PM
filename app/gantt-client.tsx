@@ -3294,7 +3294,53 @@ export default function GanttClient({
       if (!res.ok) throw new Error(await res.text());
       markSaved();
       setStatus("Child task added.");
+      // router.refresh() re-renders the server component tree and SVAR
+      // reinitializes the grid with a fresh tasks prop, which snaps
+      // scroll back to 0 on both the page and the grid body. Capture
+      // every scrollable viewport we care about *before* the refresh,
+      // then restore across a couple of animation frames so the
+      // post-render layout has landed before we seek. Without this,
+      // adding a child to a row deep in the list yanked the user to
+      // the top of the Gantt page every time.
+      const pageScroll = {
+        x: typeof window !== "undefined" ? window.scrollX : 0,
+        y: typeof window !== "undefined" ? window.scrollY : 0,
+      };
+      const frame = frameRef.current;
+      const innerScrolls: Array<{ el: HTMLElement; top: number; left: number }> = [];
+      if (frame) {
+        frame
+          .querySelectorAll<HTMLElement>("*")
+          .forEach((el) => {
+            if (el.scrollTop > 0 || el.scrollLeft > 0) {
+              innerScrolls.push({
+                el,
+                top: el.scrollTop,
+                left: el.scrollLeft,
+              });
+            }
+          });
+      }
       router.refresh();
+      // Double-rAF lands after React has committed the new tree. SVAR's
+      // virtual grid re-layouts synchronously inside that commit, so by
+      // the second frame scrollTop setters actually stick.
+      const restore = () => {
+        if (typeof window !== "undefined") {
+          window.scrollTo(pageScroll.x, pageScroll.y);
+        }
+        for (const s of innerScrolls) {
+          s.el.scrollTop = s.top;
+          s.el.scrollLeft = s.left;
+        }
+      };
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => requestAnimationFrame(restore));
+        // One more pass ~120ms later in case SVAR's internal setup
+        // shifts scroll again after the initial mount (observed on
+        // deep programs where the grid resizes after header measure).
+        setTimeout(restore, 120);
+      }
       setTimeout(() => setStatus(""), 1400);
     } catch (e: unknown) {
       setStatus(e instanceof Error ? e.message : "Create task failed");

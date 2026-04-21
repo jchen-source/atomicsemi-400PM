@@ -358,6 +358,12 @@ export default function TasksClient({
     );
   }, [burnTasks, burnSnapshots]);
 
+  // Keep table "Rem" aligned with the burndown's live math.
+  const remainingNowByTaskId = useMemo(
+    () => buildRemainingNowByTaskId(burnTasks, burnSnapshots),
+    [burnTasks, burnSnapshots],
+  );
+
   // The drawer's mini chart. Leaves get a single-task series; parents (rows
   // with children) get a parent rollup so workstream/program rows show
   // aggregate progress.
@@ -467,6 +473,7 @@ export default function TasksClient({
                 <TasksRow
                   key={r.id}
                   row={r}
+                  remainingNow={remainingNowByTaskId.get(r.id) ?? null}
                   active={r.id === activeId}
                   collapsed={collapsed.has(r.id)}
                   onToggleCollapse={() =>
@@ -500,6 +507,7 @@ export default function TasksClient({
                   <TasksRow
                     key={r.id}
                     row={{ ...r, depth: 0, hasChildren: false }}
+                    remainingNow={remainingNowByTaskId.get(r.id) ?? null}
                     active={r.id === activeId}
                     collapsed={false}
                     onToggleCollapse={() => {}}
@@ -787,12 +795,14 @@ function TasksTableHeader() {
 
 function TasksRow({
   row,
+  remainingNow,
   active,
   collapsed,
   onToggleCollapse,
   onOpen,
 }: {
   row: TaskRow;
+  remainingNow: number | null;
   active: boolean;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -804,6 +814,7 @@ function TasksRow({
     ? new Date(row.latestCommentAt)
     : new Date(row.updatedAt);
   const indent = row.depth * 14;
+  const remainingDisplay = remainingNow ?? row.remainingEffort;
 
   return (
     <div
@@ -878,8 +889,8 @@ function TasksRow({
       <div className="tasks-col tasks-col--effort">
         <span className="tasks-muted">
           {row.effortHours ?? "—"}h
-          {row.remainingEffort != null
-            ? ` · ${row.remainingEffort}h left`
+          {remainingDisplay != null
+            ? ` · ${formatHours(remainingDisplay)}h left`
             : ""}
         </span>
       </div>
@@ -1803,6 +1814,87 @@ export function OwnerPicker({
 }
 
 // ---------- helpers ----------
+
+const DEFAULT_EFFORT_HOURS = 8;
+
+function clamp(v: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function effortOfTask(task: BurndownTaskInput): number {
+  return task.effortHours && task.effortHours > 0
+    ? task.effortHours
+    : DEFAULT_EFFORT_HOURS;
+}
+
+function remainingNowAtLeaf(
+  task: BurndownTaskInput,
+  snapshots: BurndownSnapshotInput[],
+): number {
+  // Same precedence as burndown-chart.tsx for "now":
+  //   1) latest snapshot remainingEffort
+  //   2) derive from current task.progress and effort
+  const stateSnaps = snapshots.filter(
+    (s) => s.remainingEffort != null || s.progress != null,
+  );
+  const latest = stateSnaps.length ? stateSnaps[stateSnaps.length - 1] : null;
+  if (latest?.remainingEffort != null) return Math.max(0, latest.remainingEffort);
+  return Math.max(0, effortOfTask(task) * (1 - clamp(task.progress, 0, 100) / 100));
+}
+
+function buildRemainingNowByTaskId(
+  tasks: BurndownTaskInput[],
+  snapshots: BurndownSnapshotInput[],
+): Map<string, number> {
+  const taskById = new Map(tasks.map((t) => [t.id, t] as const));
+  const childrenByParent = new Map<string | null, BurndownTaskInput[]>();
+  for (const t of tasks) {
+    const arr = childrenByParent.get(t.parentId) ?? [];
+    arr.push(t);
+    childrenByParent.set(t.parentId, arr);
+  }
+  const snapsByTask = new Map<string, BurndownSnapshotInput[]>();
+  for (const s of snapshots) {
+    const arr = snapsByTask.get(s.taskId) ?? [];
+    arr.push(s);
+    snapsByTask.set(s.taskId, arr);
+  }
+  for (const arr of snapsByTask.values()) {
+    arr.sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+    );
+  }
+
+  const out = new Map<string, number>();
+  const walking = new Set<string>();
+  const visit = (id: string): number => {
+    const cached = out.get(id);
+    if (cached != null) return cached;
+    if (walking.has(id)) return 0;
+    walking.add(id);
+
+    const task = taskById.get(id);
+    if (!task) {
+      walking.delete(id);
+      return 0;
+    }
+    const kids = childrenByParent.get(id) ?? [];
+    const value =
+      kids.length === 0
+        ? remainingNowAtLeaf(task, snapsByTask.get(id) ?? [])
+        : kids.reduce((sum, k) => sum + visit(k.id), 0);
+    out.set(id, value);
+    walking.delete(id);
+    return value;
+  };
+
+  for (const t of tasks) visit(t.id);
+  return out;
+}
+
+function formatHours(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
 
 function fmtDate(d: Date) {
   if (Number.isNaN(d.getTime())) return "—";

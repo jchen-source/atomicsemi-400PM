@@ -64,7 +64,11 @@ export type Series = {
   health: "green" | "yellow" | "red";
   atRisk: boolean;
   leafCount: number;
-  usesDefaultEffort: boolean;  // true if any leaf had null effortHours
+  /** Number of leaves that have no `effortHours` estimate and contribute
+   *  0 hours to the burndown. Surfaced in the legend so users know their
+   *  capacity numbers line up with the resource matrix and can fix the
+   *  data at the source. */
+  unestimatedLeafCount: number;
 };
 
 type Point = { t: number; v: number };
@@ -119,18 +123,21 @@ export type SeriesInputs = {
   nowMs: number;
 };
 
-const DEFAULT_EFFORT_HOURS = 8;
-
 // ---------- helpers ----------
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
 }
 
+/**
+ * Hours committed on a leaf. Leaves without an `effortHours` estimate
+ * contribute 0, not a default — the resource matrix has always done
+ * this, and defaulting here hid capacity mismatches behind imaginary
+ * 8h blocks. The legend now reports the count of unestimated leaves so
+ * users know to fill them in at the source.
+ */
 function effortOf(t: BurndownTaskInput): number {
-  return t.effortHours && t.effortHours > 0
-    ? t.effortHours
-    : DEFAULT_EFFORT_HOURS;
+  return t.effortHours && t.effortHours > 0 ? t.effortHours : 0;
 }
 
 function indexSnapshots(
@@ -303,8 +310,9 @@ function buildSeriesForLeaves(
   }
 
   const totalEffort = leaves.reduce((acc, l) => acc + leafCeiling(l), 0);
-  const usesDefaultEffort = leaves.some(
-    (l) => !(l.effortHours && l.effortHours > 0),
+  const unestimatedLeafCount = leaves.reduce(
+    (acc, l) => acc + (l.effortHours && l.effortHours > 0 ? 0 : 1),
+    0,
   );
 
   // Collect every snapshot across all leaves in scope. We key by a *time
@@ -495,7 +503,7 @@ function buildSeriesForLeaves(
     health,
     atRisk,
     leafCount: leaves.length,
-    usesDefaultEffort,
+    unestimatedLeafCount,
   };
 }
 
@@ -1196,9 +1204,14 @@ export function BurndownChart({
           />
           Issue note
         </span>
-        {series.usesDefaultEffort && (
-          <span className="burn-legend-note">
-            Some leaves have no estimate — defaulted to {DEFAULT_EFFORT_HOURS}h.
+        {series.unestimatedLeafCount > 0 && (
+          <span
+            className="burn-legend-note"
+            title="These leaves aren't counted in total effort. Set an estimate on each to include them in the burndown."
+          >
+            {series.unestimatedLeafCount} leaf
+            {series.unestimatedLeafCount === 1 ? "" : "s"} without an estimate
+            — not counted.
           </span>
         )}
       </div>

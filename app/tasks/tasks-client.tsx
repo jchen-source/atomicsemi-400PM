@@ -1815,16 +1815,15 @@ export function OwnerPicker({
 
 // ---------- helpers ----------
 
-const DEFAULT_EFFORT_HOURS = 8;
-
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
 }
 
+// Mirrors burndown-chart.tsx — leaves without an explicit estimate
+// contribute 0 so this column agrees with the burndown total and with
+// the resource-matrix capacity numbers.
 function effortOfTask(task: BurndownTaskInput): number {
-  return task.effortHours && task.effortHours > 0
-    ? task.effortHours
-    : DEFAULT_EFFORT_HOURS;
+  return task.effortHours && task.effortHours > 0 ? task.effortHours : 0;
 }
 
 function remainingNowAtLeaf(

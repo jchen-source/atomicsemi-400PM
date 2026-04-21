@@ -3640,7 +3640,26 @@ export default function GanttClient({
       const span = scope.querySelector(
         ".inline-edit-display:not(.inline-edit-display--readonly)",
       ) as HTMLElement | null;
-      if (!span) return;
+      if (!span) {
+        // No editable span, but maybe the click landed on a *read-only*
+        // span. Surface the reason as a status toast so users don't stare
+        // at a silent cell wondering why typing does nothing — this is
+        // the "Hours field isn't letting me update" symptom when a row
+        // turns out to have roll-up children you forgot about.
+        const locked = scope.querySelector(
+          ".inline-edit-display.inline-edit-display--readonly",
+        ) as HTMLElement | null;
+        if (locked) {
+          const reason = locked.getAttribute("title") ?? "";
+          if (reason) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            setStatus(reason);
+            setTimeout(() => setStatus(""), 3200);
+          }
+        }
+        return;
+      }
       const key = span.dataset.editKey;
       if (!key) return;
       const opener = editorOpenersRef.current.get(key);

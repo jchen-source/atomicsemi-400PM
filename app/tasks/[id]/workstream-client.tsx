@@ -451,11 +451,36 @@ export default function WorkstreamClient({
 
       <section className="workstream-cards">
         <div className="workstream-cards-head">
-          <h2>Tasks in this workstream</h2>
-          <p className="workstream-muted">
-            {cards.length} {cards.length === 1 ? "task" : "tasks"} — push an
-            update on any card and the big chart above redraws instantly.
-          </p>
+          {(() => {
+            // When the parent has no children the server sends a single
+            // "self card" so the user can push updates directly on the
+            // workstream/leaf. Retitle the section so it's obvious
+            // they're editing the row itself, not a child of it.
+            const selfOnly =
+              cards.length === 1 && cards[0].id === headerState.id;
+            if (selfOnly) {
+              return (
+                <>
+                  <h2>Update this item</h2>
+                  <p className="workstream-muted">
+                    No subtasks yet — push updates here to edit this row
+                    directly. Add child tasks from the Gantt to split the
+                    work down into individual cards.
+                  </p>
+                </>
+              );
+            }
+            return (
+              <>
+                <h2>Tasks in this workstream</h2>
+                <p className="workstream-muted">
+                  {cards.length} {cards.length === 1 ? "task" : "tasks"} —
+                  push an update on any card and the big chart above
+                  redraws instantly.
+                </p>
+              </>
+            );
+          })()}
         </div>
         {cards.length === 0 ? (
           <p className="workstream-empty">

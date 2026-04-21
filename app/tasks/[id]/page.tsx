@@ -227,7 +227,17 @@ export default async function WorkstreamPage({
 
   // One card per direct child. We pre-compute health here so a child card
   // renders its badge correctly even before the client performs any update.
-  const cards: ChildCard[] = directChildren.map((t) => {
+  //
+  // Special case: when the parent has no real children (every task except
+  // linked issues/milestones has been filtered away) we render ONE card
+  // for the parent itself. That way clicking an empty workstream from
+  // the master list lands on the same drill-in UI as a parent with
+  // children — the user can push updates, edit owner/dates/estimates,
+  // and see the burndown on a consistent surface instead of getting an
+  // empty page and a dangling inline drawer.
+  const cardTasks =
+    directChildren.length > 0 ? directChildren : [parent];
+  const cards: ChildCard[] = cardTasks.map((t) => {
     const childKidCount = (byParent.get(t.id) ?? []).filter(
       (c) => c.type !== "ISSUE" && c.type !== "MILESTONE",
     ).length;

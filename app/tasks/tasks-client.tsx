@@ -485,10 +485,19 @@ export default function TasksClient({
                     })
                   }
                   onOpen={() => {
-                    // Parent rows (anything with children: programs + work-
-                    // streams + parent tasks) go to the dedicated standup
-                    // page. Leaf rows keep the inline drawer for quick edits.
-                    if (r.hasChildren) {
+                    // Programs and workstreams always open the dedicated
+                    // drill-in page, even when they don't have children
+                    // yet — the workstream page now renders a single
+                    // self-card when it's empty, so the user gets a
+                    // consistent surface for pushing updates at that
+                    // level of the hierarchy. Tasks/subtasks with
+                    // children also use the drill-in page; leaf tasks /
+                    // subtasks keep the inline drawer for quick edits.
+                    const usePage =
+                      r.hasChildren ||
+                      r.rowType === "program" ||
+                      r.rowType === "workstream";
+                    if (usePage) {
                       router.push(`/tasks/${r.id}`);
                     } else {
                       setActiveId(r.id);
@@ -512,10 +521,16 @@ export default function TasksClient({
                     collapsed={false}
                     onToggleCollapse={() => {}}
                     onOpen={() => {
-                      // In grouped views every row is displayed as a leaf,
-                      // but the underlying task may still have children —
-                      // use the original `r.hasChildren` for routing intent.
-                      if (r.hasChildren) router.push(`/tasks/${r.id}`);
+                      // Grouped views flatten hierarchy visually but keep
+                      // the original rowType on `r` — route programs and
+                      // workstreams to the drill-in page for consistency
+                      // with the tree view, everyone else opens the
+                      // inline drawer.
+                      const usePage =
+                        r.hasChildren ||
+                        r.rowType === "program" ||
+                        r.rowType === "workstream";
+                      if (usePage) router.push(`/tasks/${r.id}`);
                       else setActiveId(r.id);
                     }}
                   />

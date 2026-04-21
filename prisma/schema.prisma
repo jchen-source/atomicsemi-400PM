@@ -36,6 +36,13 @@ model Task {
 
   assignee String?
   resourceAllocated String?
+  // JSON-encoded [{ name: string, percent: number }] used when a task is
+  // split unevenly across multiple people. Percent values must sum to 100.
+  // When null, the legacy `assignee`/`resourceAllocated` strings drive
+  // allocation (single owner, or an even split across comma-separated
+  // names). `assignee` is always kept in sync with the name list so
+  // filters and chips that read it keep working.
+  allocations String?
   effortHours Int?
   tags     String  @default("[]") // JSON-encoded string[]
 

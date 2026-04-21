@@ -2543,6 +2543,353 @@ body {
   color: #94a3b8;
 }
 
+/* ----- AllocationPicker (multi-owner + percent split) ------------------ */
+.alloc-picker {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: 340px;
+  max-height: 480px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 24px 60px -22px rgba(15, 23, 42, 0.4);
+}
+.alloc-picker__head {
+  padding: 12px 14px 6px;
+  border-bottom: 1px solid #f1f5f9;
+}
+.alloc-picker__title {
+  font-size: 13px;
+  font-weight: 700;
+  margin: 0;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+.alloc-picker__sub {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: #64748b;
+}
+
+.alloc-picker__selected {
+  padding: 10px 12px;
+  border-bottom: 1px solid #f1f5f9;
+  background: #fafbfe;
+}
+.alloc-picker__selected-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+.alloc-picker__selected-actions {
+  display: flex;
+  gap: 6px;
+}
+.alloc-picker__mini-btn {
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.alloc-picker__mini-btn:hover {
+  background: #eef2ff;
+  border-color: #c7d2fe;
+  color: #3730a3;
+}
+.alloc-picker__mini-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.alloc-picker__mini-btn--danger {
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+.alloc-picker__mini-btn--danger:hover {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+
+.alloc-picker__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.alloc-picker__row {
+  display: grid;
+  grid-template-columns: 1fr 64px auto auto 22px;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: #1e293b;
+}
+.alloc-picker__row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.alloc-picker__row-pct {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-family: inherit;
+  text-align: right;
+  outline: none;
+  background: #ffffff;
+}
+.alloc-picker__row-pct:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 2px #e0e7ff;
+}
+.alloc-picker__row-unit {
+  color: #94a3b8;
+  font-size: 12px;
+}
+.alloc-picker__row-hours {
+  color: #6366f1;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.alloc-picker__row-solo {
+  grid-column: 2 / span 3;
+  color: #94a3b8;
+  font-size: 11px;
+  font-style: italic;
+  text-align: right;
+}
+.alloc-picker__row-remove {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  font-family: inherit;
+}
+.alloc-picker__row-remove:hover {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.alloc-picker__total {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: 8px;
+  font-size: 11.5px;
+  color: #047857;
+}
+.alloc-picker__total strong {
+  font-variant-numeric: tabular-nums;
+  color: #065f46;
+}
+.alloc-picker__total-hint {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+}
+.alloc-picker__total--bad {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+.alloc-picker__total--bad strong {
+  color: #991b1b;
+}
+
+.alloc-picker__roster {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.alloc-picker__search {
+  padding: 9px 12px;
+  border: 0;
+  border-bottom: 1px solid #eef2f7;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  background: #f8fafc;
+}
+.alloc-picker__search:focus {
+  background: #ffffff;
+  box-shadow: inset 0 -2px 0 0 #6366f1;
+}
+.alloc-picker__list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+.alloc-picker__person {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 12px;
+  background: transparent;
+  border: 0;
+  font-family: inherit;
+  font-size: 13px;
+  color: #1e293b;
+  text-align: left;
+  cursor: pointer;
+}
+.alloc-picker__person:hover,
+.alloc-picker__person:focus-visible {
+  background: #eef2ff;
+  outline: none;
+}
+.alloc-picker__person--selected {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+.alloc-picker__person--inactive {
+  color: #94a3b8;
+}
+.alloc-picker__person--new {
+  color: #4338ca;
+  font-weight: 600;
+}
+.alloc-picker__person-check {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: #e2e8f0;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.alloc-picker__person--selected .alloc-picker__person-check {
+  background: rgb(90 95 223);
+  color: #ffffff;
+}
+.alloc-picker__person-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.alloc-picker__person-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.alloc-picker__person-role {
+  font-size: 11px;
+  color: #94a3b8;
+}
+.alloc-picker__tag {
+  flex: 0 0 auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+  color: #64748b;
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+.alloc-picker__empty {
+  padding: 14px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.alloc-picker__error {
+  padding: 6px 12px;
+  font-size: 11.5px;
+  color: #b91c1c;
+  background: #fef2f2;
+  border-top: 1px solid #fecaca;
+}
+
+.alloc-picker__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid #f1f5f9;
+  background: #f8fafc;
+}
+.alloc-picker__btn {
+  border: 1px solid transparent;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+.alloc-picker__btn--ghost {
+  background: transparent;
+  color: #475569;
+  border-color: #e2e8f0;
+}
+.alloc-picker__btn--ghost:hover {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  color: #1e293b;
+}
+.alloc-picker__btn--primary {
+  background: rgb(90 95 223);
+  color: #ffffff;
+  border-color: rgb(90 95 223);
+}
+.alloc-picker__btn--primary:hover {
+  background: rgb(71 76 198);
+  border-color: rgb(71 76 198);
+}
+.alloc-picker__btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* Inherit reset/hint styles for the /tasks drawer's new Estimate +
    Remaining fields — same visual language as the workstream form. */
 .tasks-field-hint {

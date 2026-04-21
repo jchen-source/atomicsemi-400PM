@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
-import { UpdateTaskSchema } from "@/lib/validation";
+import {
+  UpdateTaskSchema,
+  assigneeStringFromAllocations,
+  normalizeAllocations,
+} from "@/lib/validation";
 import {
   rescheduleDownstream,
   rollupAncestorsForIds,
@@ -73,6 +77,20 @@ export async function PATCH(req: Request, ctx: RouteCtx) {
     delete dbData.parentId;
   }
   delete dbData.linkedTaskId;
+
+  // Allocations come in as [{ name, percent }]. We persist them as a JSON
+  // string (SQLite-friendly) and keep `assignee` in sync as a comma-joined
+  // name list so existing filters/chips that read it keep working. When
+  // the client sends `allocations: null` or `[]`, we clear the column and
+  // fall back to legacy single-owner behavior; in that case we DON'T
+  // overwrite whatever `assignee` the client also sent.
+  if ("allocations" in taskPatch) {
+    const normalized = normalizeAllocations(taskPatch.allocations ?? null);
+    dbData.allocations = normalized ? JSON.stringify(normalized) : null;
+    if (normalized) {
+      dbData.assignee = assigneeStringFromAllocations(normalized);
+    }
+  }
 
   const { updatedTask, updatedIds } = await prisma.$transaction(async (tx) => {
     // Effort hours on a parent are always a rollup sum of their children.

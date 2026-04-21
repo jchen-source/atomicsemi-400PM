@@ -20,6 +20,7 @@ import {
   type BurndownSnapshotInput,
   type BurndownTaskInput,
 } from "./burndown-chart";
+import { AllocationPicker } from "./allocation-picker";
 
 export type TaskRow = {
   id: string;
@@ -30,6 +31,9 @@ export type TaskRow = {
   rowType: "program" | "workstream" | "task" | "subtask";
   status: string;
   assignee: string | null;
+  /** Explicit percent split persisted on the task. When null, `assignee`
+   *  is the source of truth (single owner or comma-separated even-split). */
+  allocations: Array<{ name: string; percent: number }> | null;
   priority: "high" | "medium" | "low" | null;
   startDate: string;
   endDate: string;
@@ -952,6 +956,9 @@ function UpdateDrawer({
   const [blocked, setBlocked] = useState(row.blocked);
   const [priority, setPriority] = useState<TaskRow["priority"]>(row.priority);
   const [assignee, setAssignee] = useState<string | null>(row.assignee);
+  const [allocations, setAllocations] = useState<
+    Array<{ name: string; percent: number }> | null
+  >(row.allocations);
   const [ownerOpen, setOwnerOpen] = useState(false);
   const [ownerSaving, setOwnerSaving] = useState(false);
   const [estimate, setEstimate] = useState<number | "">(
@@ -999,24 +1006,29 @@ function UpdateDrawer({
     ? remainingEffort
     : (derivedRemaining ?? remainingEffort);
 
-  // Owner change is a dedicated PATCH so parents can be reassigned too
-  // (the progress route is leaf-only and would 409). Optimistic locally so
-  // the chip flips immediately, then we let the parent patch the row state
-  // via onSaved so the row list + burnTasks stay consistent.
-  async function saveOwner(name: string | null) {
-    const next = name && name.trim() ? name.trim() : null;
-    if ((assignee ?? null) === next) {
-      setOwnerOpen(false);
-      return;
-    }
+  // Owner/allocation change is a dedicated PATCH so parents can be
+  // reassigned too (the progress route is leaf-only and would 409).
+  // Optimistic locally so the chip flips immediately, then we let the
+  // parent patch the row state via onSaved so the row list + burnTasks
+  // stay consistent.
+  async function saveOwner(payload: {
+    allocations: Array<{ name: string; percent: number }> | null;
+    assignee: string | null;
+  }) {
+    const prevAssignee = assignee;
+    const prevAllocations = allocations;
     setOwnerSaving(true);
     setError(null);
-    setAssignee(next);
+    setAssignee(payload.assignee);
+    setAllocations(payload.allocations);
     try {
       const res = await fetch(`/api/tasks/${row.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ assignee: next }),
+        body: JSON.stringify({
+          assignee: payload.assignee,
+          allocations: payload.allocations,
+        }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as {
@@ -1028,13 +1040,20 @@ function UpdateDrawer({
         task: { id: string; assignee: string | null };
       };
       onSaved({
-        affected: [{ id: data.task.id, assignee: data.task.assignee }],
+        affected: [
+          {
+            id: data.task.id,
+            assignee: data.task.assignee,
+            allocations: payload.allocations,
+          },
+        ],
         newSnapshot: null,
       });
-      setOwnerOpen(false);
     } catch (e) {
-      setAssignee(row.assignee);
+      setAssignee(prevAssignee);
+      setAllocations(prevAllocations);
       setError(e instanceof Error ? e.message : "Failed to update owner");
+      throw e;
     } finally {
       setOwnerSaving(false);
     }
@@ -1163,14 +1182,17 @@ function UpdateDrawer({
         <span className="tasks-drawer-owner__label">Owner</span>
         <OwnerChip
           assignee={assignee}
+          allocations={allocations}
           onClick={() => setOwnerOpen((v) => !v)}
           saving={ownerSaving}
         />
         {ownerOpen && (
-          <OwnerPicker
+          <AllocationPicker
             people={people}
+            currentAllocations={allocations}
             currentAssignee={assignee}
-            onSelect={(name) => void saveOwner(name)}
+            taskEffortHours={typeof estimate === "number" ? estimate : null}
+            onSave={saveOwner}
             onClose={() => setOwnerOpen(false)}
           />
         )}
@@ -1434,14 +1456,32 @@ export function initialsOf(name: string | null): string {
 
 export function OwnerChip({
   assignee,
+  allocations,
   onClick,
   saving,
 }: {
   assignee: string | null;
+  /** Optional: when a percent split is persisted we show a "split" badge
+   *  and use the allocation list to build the hover title so the user
+   *  sees Alice 60% / Bob 40% without opening the picker. */
+  allocations?: Array<{ name: string; percent: number }> | null;
   onClick: () => void;
   saving: boolean;
 }) {
   const has = !!(assignee && assignee.trim());
+  const splitNames = allocations && allocations.length > 1 ? allocations : null;
+  const displayLabel = saving
+    ? "Saving…"
+    : splitNames
+      ? `${splitNames.length} owners · split`
+      : has
+        ? (assignee as string)
+        : "Unassigned";
+  const titleText = splitNames
+    ? splitNames.map((a) => `${a.name} — ${a.percent}%`).join("\n")
+    : has
+      ? `Owner: ${assignee}`
+      : "Assign owners";
   return (
     <button
       type="button"
@@ -1450,14 +1490,12 @@ export function OwnerChip({
       }
       onClick={onClick}
       disabled={saving}
-      title={has ? `Owner: ${assignee}` : "Assign an owner"}
+      title={titleText}
     >
       <span className="tasks-owner-chip__avatar" aria-hidden>
-        {initialsOf(assignee)}
+        {splitNames ? splitNames.length : initialsOf(assignee)}
       </span>
-      <span className="tasks-owner-chip__name">
-        {saving ? "Saving…" : has ? assignee : "Unassigned"}
-      </span>
+      <span className="tasks-owner-chip__name">{displayLabel}</span>
       <span className="tasks-owner-chip__chev" aria-hidden>
         ▾
       </span>

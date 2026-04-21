@@ -233,6 +233,9 @@ export default async function GanttPage() {
             effortHours: t.effortHours ?? null,
             assignee: t.assignee ?? null,
             resourceAllocated: t.resourceAllocated ?? null,
+            allocations:
+              (t as typeof t & { allocations?: string | null }).allocations ??
+              null,
             parent: t.parentId,
             open: (childCountByParent.get(t.id) ?? 0) > 0,
             type:

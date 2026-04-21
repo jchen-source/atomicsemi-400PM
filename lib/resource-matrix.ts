@@ -73,10 +73,13 @@ export function splitAssignees(
 /**
  * Build the per-person per-week hours matrix.
  *
- * Distribution rule (matches the user's spec):
+ * Distribution rule:
  *   perDay = effortHours / durationInDays
- *   perPersonPerDay = perDay / numAssignees
+ *   perPersonPerDay = perDay * share(person)
+ *     share comes from Task.allocations (percent/100) when present, else
+ *     an even 1/N across the names found in assignee/resourceAllocated.
  *   ...distributed evenly across every day the task spans.
+ *
  * Tasks with no assignees go into the "Unassigned" bucket so capacity
  * planning surfaces work that still needs an owner.
  *
@@ -88,10 +91,9 @@ export function splitAssignees(
  *   assigned to both the workstream and one of its tasks.
  *
  *   If a leaf has no assignee(s) of its own, we walk up the parent
- *   chain and attribute its hours to the nearest ancestor that does.
- *   That lets teams that assign at the workstream level keep working
- *   without explicitly tagging every leaf. If no ancestor has one
- *   either, the hours fall into the "Unassigned" bucket as before.
+ *   chain and attribute its hours to the nearest ancestor that does
+ *   (honoring that ancestor's allocations split too). If no ancestor
+ *   has one either, the hours fall into the "Unassigned" bucket.
  */
 export function buildResourceMatrix({
   tasks,
@@ -148,21 +150,64 @@ export function buildResourceMatrix({
     tasksById.set(t.id, t);
     if (t.parentId) hasChildren.add(t.parentId);
   }
-  const resolveTargets = (t: Task): string[] => {
+  /**
+   * One contribution target: a canonical person name plus the fraction of
+   * this task's hours they should receive. Shares across the returned
+   * list always sum to ~1 (we defensively re-normalize below to absorb
+   * floating point slop from stored percents).
+   */
+  type Target = { name: string; share: number };
+
+  const canonOf = (raw: string): string =>
+    canonicalRoster.get(raw.toLowerCase()) ?? raw;
+
+  const targetsFromTask = (cursor: Task): Target[] | null => {
+    // Explicit percent split wins. We accept the JSON column as-is but
+    // defensively guard against malformed rows so one bad record doesn't
+    // tank the whole matrix.
+    const raw = (cursor as Task & { allocations?: string | null })
+      .allocations;
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as Array<{
+          name?: unknown;
+          percent?: unknown;
+        }>;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const rows = parsed
+            .map((r) => ({
+              name: typeof r.name === "string" ? r.name.trim() : "",
+              percent: typeof r.percent === "number" ? r.percent : 0,
+            }))
+            .filter((r) => r.name && r.percent > 0);
+          const total = rows.reduce((s, r) => s + r.percent, 0);
+          if (rows.length > 0 && total > 0) {
+            return rows.map((r) => ({
+              name: canonOf(r.name),
+              share: r.percent / total,
+            }));
+          }
+        }
+      } catch {
+        // fall through to the legacy string-based split
+      }
+    }
+    const names = splitAssignees(cursor.assignee, cursor.resourceAllocated);
+    if (names.length === 0) return null;
+    const share = 1 / names.length;
+    return names.map((n) => ({ name: canonOf(n), share }));
+  };
+
+  const resolveTargets = (t: Task): Target[] => {
     // Walk parentId chain, bounded to the depth of the fetched set,
-    // collecting the first ancestor (including `t` itself) with any
-    // assignee. `seen` guards against cycles from stale data.
+    // returning the first ancestor (including `t` itself) that has any
+    // form of assignment. `seen` guards against cycles from stale data.
     const seen = new Set<string>();
     let cursor: Task | undefined = t;
     while (cursor && !seen.has(cursor.id)) {
       seen.add(cursor.id);
-      const names = splitAssignees(cursor.assignee, cursor.resourceAllocated);
-      if (names.length > 0) {
-        return names.map((raw) => {
-          const canon = canonicalRoster.get(raw.toLowerCase());
-          return canon ?? raw;
-        });
-      }
+      const targets = targetsFromTask(cursor);
+      if (targets) return targets;
       if (!cursor.parentId) break;
       cursor = tasksById.get(cursor.parentId);
     }
@@ -188,11 +233,13 @@ export function buildResourceMatrix({
     const perDay = effort / spanDays;
 
     const resolved = resolveTargets(t);
-    const targets: string[] = resolved.length === 0 ? ["__unassigned__"] : resolved;
-    const perPersonPerDay = perDay / targets.length;
+    const targets =
+      resolved.length === 0
+        ? [{ name: "__unassigned__", share: 1 }]
+        : resolved;
 
     // Walk each day in the task span that also falls inside our window and
-    // drop `perPersonPerDay` into each assignee's week bucket.
+    // drop `perDay * share` into each assignee's week bucket.
     const firstDay = startOfDayUTC(new Date(startMs));
     for (let i = 0; i < spanDays; i++) {
       const dayMs = firstDay.getTime() + i * DAY_MS;
@@ -200,24 +247,25 @@ export function buildResourceMatrix({
       const weekKey = isoDate(startOfWeekUTC(new Date(dayMs)));
       const weekIdx = weekIndexByKey.get(weekKey);
       if (weekIdx == null) continue;
-      for (const name of targets) {
+      for (const target of targets) {
+        const slice = perDay * target.share;
         let bucket: Bucket;
-        if (name === "__unassigned__") {
+        if (target.name === "__unassigned__") {
           bucket = unassigned;
         } else {
-          bucket = byName.get(name) ?? freshBucket(name);
-          byName.set(name, bucket);
+          bucket = byName.get(target.name) ?? freshBucket(target.name);
+          byName.set(target.name, bucket);
         }
-        bucket.totalHours += perPersonPerDay;
-        bucket.hoursByWeek[weekIdx] += perPersonPerDay;
+        bucket.totalHours += slice;
+        bucket.hoursByWeek[weekIdx] += slice;
         const prev = bucket.byTask.get(t.id);
         if (prev) {
-          prev.hours += perPersonPerDay;
+          prev.hours += slice;
         } else {
           bucket.byTask.set(t.id, {
             taskId: t.id,
             taskTitle: t.title,
-            hours: perPersonPerDay,
+            hours: slice,
           });
         }
       }

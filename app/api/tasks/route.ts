@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import { revalidatePath } from "next/cache";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { CreateTaskSchema } from "@/lib/validation";
+import {
+  CreateTaskSchema,
+  assigneeStringFromAllocations,
+  normalizeAllocations,
+} from "@/lib/validation";
 import { parseTags, serializeTags } from "@/lib/utils";
 import { rollupFromParentId } from "@/lib/schedule";
 
@@ -41,10 +45,17 @@ export async function POST(req: Request) {
     );
   }
 
-  const { parentId, linkedTaskId, ...rest } = data;
+  const { parentId, linkedTaskId, allocations, ...rest } = data;
   const relationParentId = linkedTaskId ?? parentId;
+  const normalizedAlloc = normalizeAllocations(allocations ?? null);
   const createData: Prisma.TaskCreateInput = {
     ...rest,
+    // Keep `assignee` in sync with the split so filters/chips that read it
+    // reflect multi-owner tasks without schema churn elsewhere.
+    assignee: normalizedAlloc
+      ? assigneeStringFromAllocations(normalizedAlloc)
+      : rest.assignee,
+    allocations: normalizedAlloc ? JSON.stringify(normalizedAlloc) : null,
     tags: serializeTags(data.tags),
     parent: relationParentId ? { connect: { id: relationParentId } } : undefined,
   };

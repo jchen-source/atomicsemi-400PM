@@ -169,6 +169,12 @@ export default async function TasksPage() {
       rowType,
       status: t.status,
       assignee: t.assignee,
+      // Parse the JSON-encoded percent split for the drawer. Malformed
+      // rows fall back to null so the picker shows the legacy single-
+      // owner path instead of blowing up the whole page.
+      allocations: parseAllocationsJSON(
+        (t as typeof t & { allocations?: string | null }).allocations,
+      ),
       priority,
       startDate: t.startDate.toISOString(),
       endDate: t.endDate.toISOString(),
@@ -326,6 +332,25 @@ function buildPeopleOptions(
     if (a.active !== b.active) return a.active ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+}
+
+function parseAllocationsJSON(
+  raw: string | null | undefined,
+): Array<{ name: string; percent: number }> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Array<{ name?: unknown; percent?: unknown }>;
+    if (!Array.isArray(parsed)) return null;
+    const rows = parsed
+      .map((r) => ({
+        name: typeof r.name === "string" ? r.name.trim() : "",
+        percent: typeof r.percent === "number" ? r.percent : 0,
+      }))
+      .filter((r) => r.name && r.percent > 0);
+    return rows.length > 0 ? rows : null;
+  } catch {
+    return null;
+  }
 }
 
 function deriveRowType(

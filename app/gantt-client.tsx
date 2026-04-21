@@ -13,6 +13,33 @@ import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import "@svar-ui/react-gantt/all.css";
 import "./gantt-theme.css";
+import { AllocationPicker } from "./tasks/allocation-picker";
+
+/**
+ * Parse the JSON-encoded percent split stored on a task. We accept both
+ * null and malformed rows without crashing the render — the picker will
+ * just show the legacy single-owner path in that case. Kept inline in
+ * the Gantt module so we don't pull more of the /tasks client tree into
+ * this file.
+ */
+function parseAllocationsJSON(
+  raw: string | null | undefined,
+): Array<{ name: string; percent: number }> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Array<{ name?: unknown; percent?: unknown }>;
+    if (!Array.isArray(parsed)) return null;
+    const rows = parsed
+      .map((r) => ({
+        name: typeof r.name === "string" ? r.name.trim() : "",
+        percent: typeof r.percent === "number" ? r.percent : 0,
+      }))
+      .filter((r) => r.name && r.percent > 0);
+    return rows.length > 0 ? rows : null;
+  } catch {
+    return null;
+  }
+}
 
 // We dynamically import every SVAR component with ssr:false so Next's server
 // renderer doesn't try to reach into the client-only library.
@@ -52,6 +79,9 @@ export type GanttTaskInput = {
   effortHours?: number | null;
   assignee?: string | null;
   resourceAllocated?: string | null;
+  /** JSON-encoded per-person percent split; null/missing falls back to
+   *  legacy single-owner behavior. */
+  allocations?: string | null;
 };
 
 export type GanttLinkInput = {
@@ -3308,17 +3338,22 @@ export default function GanttClient({
     }
   }
 
-  // Persist an assignee selection for the currently-open resource
-  // picker. Goes through the shared commit path so we get the same
-  // optimistic update / server resync / rollup behavior as other
-  // inline edits.
-  async function assignResource(name: string | null) {
+  // Persist an assignee / allocation selection for the currently-open
+  // resource picker. Goes through the shared commit path so we get the
+  // same optimistic update / server resync / rollup behavior as other
+  // inline edits. When `allocations` is null we keep the legacy single-
+  // owner path so we don't store a 100% split JSON for simple cases.
+  async function assignResource(payload: {
+    assignee: string | null;
+    allocations: Array<{ name: string; percent: number }> | null;
+  }) {
     if (!resourcePicker) return;
     const { taskId } = resourcePicker;
     setResourcePicker(null);
     setResourceQuery("");
     await commitInlineEditRef.current(taskId, {
-      assignee: name ?? null,
+      assignee: payload.assignee,
+      allocations: payload.allocations,
     });
   }
 
@@ -4566,22 +4601,44 @@ export default function GanttClient({
         />
       )}
 
-      {resourcePicker && (
-        <ResourcePicker
-          anchor={resourcePicker.anchor}
-          people={people}
-          currentAssignee={
-            tasks.find((t) => t.id === resourcePicker.taskId)?.assignee ?? null
-          }
-          query={resourceQuery}
-          setQuery={setResourceQuery}
-          onCancel={() => {
-            setResourcePicker(null);
-            setResourceQuery("");
-          }}
-          onSelect={(name) => void assignResource(name)}
-        />
-      )}
+      {resourcePicker &&
+        (() => {
+          const t = tasks.find((x) => x.id === resourcePicker.taskId);
+          const parsed = parseAllocationsJSON(t?.allocations ?? null);
+          // Clamp inside viewport so a picker opened near the bottom of
+          // the grid doesn't render half off-screen. 500 is a generous
+          // estimate of max picker height (see .alloc-picker max-height
+          // in globals.css — 480 + a touch of breathing room).
+          const top = Math.min(
+            resourcePicker.anchor.top,
+            Math.max(8, window.innerHeight - 500),
+          );
+          const left = Math.min(
+            resourcePicker.anchor.left,
+            Math.max(8, window.innerWidth - 360),
+          );
+          return (
+            <AllocationPicker
+              people={people}
+              currentAllocations={parsed}
+              currentAssignee={t?.assignee ?? null}
+              taskEffortHours={t?.effortHours ?? null}
+              style={{
+                position: "fixed",
+                top,
+                left,
+                right: "auto",
+              }}
+              onClose={() => {
+                setResourcePicker(null);
+                setResourceQuery("");
+              }}
+              onSave={async (payload) => {
+                await assignResource(payload);
+              }}
+            />
+          );
+        })()}
 
       {barEditor &&
         (() => {
@@ -5948,11 +6005,13 @@ function ParentPicker({
   );
 }
 
-// Floating dropdown used by the Resources column. Renders at the
-// click coordinates supplied by the parent so the menu feels attached
-// to the cell it was opened from, with keyboard search, arrow keys,
-// and an explicit "Unassigned" option so users can clear an assignee
-// without going back through the People page.
+// DEPRECATED (kept temporarily): the Gantt resource column now opens
+// the shared <AllocationPicker/> (app/tasks/allocation-picker.tsx) so
+// single- and multi-owner tasks with a percent split use the exact
+// same editor as the /tasks drawer. This function is retained for one
+// release cycle in case we need to roll back quickly — it's not
+// referenced anywhere else in this module.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function ResourcePicker({
   anchor,
   people,

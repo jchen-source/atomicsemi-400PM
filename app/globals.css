@@ -2322,9 +2322,17 @@ body {
 
 .workstream-cards-head {
   display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.workstream-cards-head-main {
+  display: flex;
   flex-direction: column;
   gap: 2px;
-  margin-bottom: 6px;
+  min-width: 0;
 }
 .workstream-cards-head h2 {
   margin: 0;
@@ -2336,6 +2344,76 @@ body {
 }
 .workstream-cards-head p {
   margin: 0;
+}
+
+/* "+ Add task" affordance in the cards section header. Styled as a
+   primary pill so it reads as the main action on the surface without
+   overpowering the per-card update forms below. */
+.ws-add-task-btn {
+  flex-shrink: 0;
+  align-self: flex-start;
+  border: 1px solid #6366f1;
+  background: #6366f1;
+  color: #ffffff;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.ws-add-task-btn:hover {
+  background: #4f46e5;
+  border-color: #4f46e5;
+}
+.ws-add-task-btn[aria-expanded="true"] {
+  background: #ffffff;
+  color: #6366f1;
+}
+
+/* Inline AddTaskForm below the section head. Shares the banner-form
+   base styles (row of fields + action buttons) but takes the full card
+   width instead of being wrapped in a red banner chrome. */
+.ws-add-task-form {
+  margin: 0 0 10px;
+  border: 1px solid rgb(var(--border));
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+
+/* Per-card inline date editor. Sits between the card header and the
+   body so it's visually grouped with the metadata it's editing. */
+.ws-card-inline-edit {
+  padding: 0 14px 8px;
+}
+.ws-card-inline-edit .ws-banner-form {
+  border: 1px solid rgb(var(--border));
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  margin: 0;
+}
+
+/* Small "Edit dates" button in the card submeta. Link-y treatment so
+   it doesn't compete with the owner chip or the health pill. */
+.ws-card-date-edit {
+  border: 1px solid transparent;
+  background: transparent;
+  color: #6366f1;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.ws-card-date-edit:hover {
+  background: #eef2ff;
+  border-color: #c7d2fe;
+}
+.ws-card-date-edit[aria-expanded="true"] {
+  background: #eef2ff;
+  border-color: #c7d2fe;
 }
 
 .workstream-cards-grid {

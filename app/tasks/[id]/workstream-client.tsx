@@ -153,6 +153,10 @@ export default function WorkstreamClient({
   const [history, setHistory] =
     useState<WorkstreamSnapshot[]>(initialDisplay);
   const [headerState, setHeaderState] = useState<WorkstreamHeader>(header);
+  // Controls the collapsible "Add task" form in the cards section head.
+  // A single piece of state drives both the button label ("+ Add task"
+  // vs "Cancel") and whether the form is mounted below it.
+  const [addingTask, setAddingTask] = useState(false);
 
   const nowMs = new Date(nowISO).getTime();
 
@@ -419,6 +423,24 @@ export default function WorkstreamClient({
     );
   };
 
+  // Add-task handler: receives a freshly-created child task (already
+  // persisted by the POST /api/tasks call inside AddTaskForm) and splices
+  // it into the cards grid + burndown dataset. When the grid was
+  // previously showing the "self card" (parent with no children), the
+  // self card is replaced so the layout flips cleanly from "one self-card"
+  // to "one real child" without a full page reload. Any additional cards
+  // just append.
+  const onTaskAdded = (newCard: ChildCard, newBurn: BurndownTaskInput) => {
+    setCards((prev) => {
+      const selfOnly = prev.length === 1 && prev[0].id === headerState.id;
+      return selfOnly ? [newCard] : [...prev, newCard];
+    });
+    setBurnTasks((prev) => {
+      const selfOnly = prev.length === 1 && prev[0].id === headerState.id;
+      return selfOnly ? [newBurn] : [...prev, newBurn];
+    });
+  };
+
   // Resolve-issue handler: flips the linked issue to DONE in place.
   const onIssueResolved = (cardId: string, issueId: string) => {
     setCards((prev) =>
@@ -468,37 +490,58 @@ export default function WorkstreamClient({
 
       <section className="workstream-cards">
         <div className="workstream-cards-head">
-          {(() => {
-            // When the parent has no children the server sends a single
-            // "self card" so the user can push updates directly on the
-            // workstream/leaf. Retitle the section so it's obvious
-            // they're editing the row itself, not a child of it.
-            const selfOnly =
-              cards.length === 1 && cards[0].id === headerState.id;
-            if (selfOnly) {
+          <div className="workstream-cards-head-main">
+            {(() => {
+              // When the parent has no children the server sends a single
+              // "self card" so the user can push updates directly on the
+              // workstream/leaf. Retitle the section so it's obvious
+              // they're editing the row itself, not a child of it.
+              const selfOnly =
+                cards.length === 1 && cards[0].id === headerState.id;
+              if (selfOnly) {
+                return (
+                  <>
+                    <h2>Update this item</h2>
+                    <p className="workstream-muted">
+                      No subtasks yet — push updates here to edit this row
+                      directly, or add a child task below to split the
+                      work down into individual cards.
+                    </p>
+                  </>
+                );
+              }
               return (
                 <>
-                  <h2>Update this item</h2>
+                  <h2>Tasks in this workstream</h2>
                   <p className="workstream-muted">
-                    No subtasks yet — push updates here to edit this row
-                    directly. Add child tasks from the Gantt to split the
-                    work down into individual cards.
+                    {cards.length} {cards.length === 1 ? "task" : "tasks"} —
+                    push an update on any card and the big chart above
+                    redraws instantly.
                   </p>
                 </>
               );
-            }
-            return (
-              <>
-                <h2>Tasks in this workstream</h2>
-                <p className="workstream-muted">
-                  {cards.length} {cards.length === 1 ? "task" : "tasks"} —
-                  push an update on any card and the big chart above
-                  redraws instantly.
-                </p>
-              </>
-            );
-          })()}
+            })()}
+          </div>
+          <button
+            type="button"
+            className="ws-add-task-btn"
+            onClick={() => setAddingTask((v) => !v)}
+            aria-expanded={addingTask}
+          >
+            {addingTask ? "Cancel" : "+ Add task"}
+          </button>
         </div>
+        {addingTask && (
+          <AddTaskForm
+            parent={headerState}
+            people={people}
+            onCancel={() => setAddingTask(false)}
+            onCreated={(card, burn) => {
+              onTaskAdded(card, burn);
+              setAddingTask(false);
+            }}
+          />
+        )}
         {cards.length === 0 ? (
           <p className="workstream-empty">
             No child tasks yet. Create some from the Gantt chart and they'll
@@ -638,6 +681,10 @@ function TaskCard({
   const [assignee, setAssignee] = useState<string | null>(card.assignee);
   const [ownerOpen, setOwnerOpen] = useState(false);
   const [ownerSaving, setOwnerSaving] = useState(false);
+  // Inline date editor. Toggled from the submeta "Edit" affordance so
+  // the user can reschedule a card without the late-start banner being
+  // present (same RescheduleForm, mounted outside the red banner).
+  const [editingDates, setEditingDates] = useState(false);
 
   // Reset form fields when card prop changes (e.g. after save affects them).
   useMemo(() => {
@@ -899,6 +946,15 @@ function TaskCard({
             <span>
               {fmtDate(card.startDate)} → {fmtDate(card.endDate)}
             </span>
+            <button
+              type="button"
+              className="ws-card-date-edit"
+              onClick={() => setEditingDates((v) => !v)}
+              aria-expanded={editingDates}
+              title="Edit start and end dates"
+            >
+              {editingDates ? "Close" : "Edit dates"}
+            </button>
             {card.hasChildren && (
               <>
                 <span>·</span>
@@ -918,6 +974,19 @@ function TaskCard({
         </div>
         <HealthPill health={card.health} compact />
       </header>
+
+      {editingDates && (
+        <div className="ws-card-inline-edit">
+          <RescheduleForm
+            card={card}
+            onCancel={() => setEditingDates(false)}
+            onDone={(affected) => {
+              onRescheduled(card.id, affected);
+              setEditingDates(false);
+            }}
+          />
+        </div>
+      )}
 
       {(isLateToStart || hasSlippingIssue) && (
         <LateStartBanner
@@ -1656,6 +1725,246 @@ function FileIssueForm({
           disabled={saving}
         >
           {saving ? "Filing…" : "File issue"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// ---------- Add task inline form ----------
+
+/**
+ * Inline form that creates a new TASK underneath the current workstream
+ * parent. Uses the same POST /api/tasks endpoint as the Gantt so all
+ * validation + rollup logic stays in one place. On success we receive
+ * the freshly-persisted task + rollup affected list, spin it into the
+ * ChildCard / BurndownTaskInput shapes the client state expects, and
+ * hand both back to the parent so the cards grid and burndown dataset
+ * update optimistically without a full page reload.
+ */
+function AddTaskForm({
+  parent,
+  people,
+  onCancel,
+  onCreated,
+}: {
+  parent: WorkstreamHeader;
+  people: PersonOption[];
+  onCancel: () => void;
+  onCreated: (card: ChildCard, burn: BurndownTaskInput) => void;
+}) {
+  // Default the new task's window to the parent's window so the Gantt
+  // doesn't get a task that escapes its workstream on day one. User can
+  // still narrow the dates in the form before saving.
+  const [title, setTitle] = useState("");
+  const [start, setStart] = useState<string>(toInputDate(parent.startDate));
+  const [end, setEnd] = useState<string>(toInputDate(parent.endDate));
+  const [assignee, setAssignee] = useState<string | null>(null);
+  const [ownerOpen, setOwnerOpen] = useState(false);
+  const [effort, setEffort] = useState<number | "">("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    const t = title.trim();
+    if (!t) {
+      setError("Title is required.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const startISO = new Date(start).toISOString();
+      const endISO = new Date(end).toISOString();
+      if (new Date(startISO) > new Date(endISO)) {
+        throw new Error("Start must be on or before end.");
+      }
+      const body: Record<string, unknown> = {
+        title: t,
+        type: "TASK",
+        status: "TODO",
+        startDate: startISO,
+        endDate: endISO,
+        parentId: parent.id,
+        progress: 0,
+      };
+      if (assignee && assignee.trim()) body.assignee = assignee.trim();
+      if (effort !== "" && Number(effort) > 0) {
+        body.effortHours = Number(effort);
+      }
+      const res = await fetch(`/api/tasks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || `HTTP ${res.status}`);
+      }
+      const created = (await res.json()) as {
+        id: string;
+        title: string;
+        type: string;
+        status: string;
+        blocked?: boolean;
+        progress: number;
+        effortHours: number | null;
+        remainingEffort: number | null;
+        startDate: string;
+        endDate: string;
+        nextStep: string | null;
+        assignee: string | null;
+        health: "green" | "yellow" | "red" | null;
+        lastProgressAt: string | null;
+      };
+      const card: ChildCard = {
+        id: created.id,
+        title: created.title,
+        type: created.type,
+        hasChildren: false,
+        childCount: 0,
+        assignee: created.assignee,
+        status: created.status,
+        blocked: created.blocked ?? false,
+        progress: created.progress ?? 0,
+        effortHours: created.effortHours ?? null,
+        remainingEffort: created.remainingEffort ?? null,
+        startDate: created.startDate,
+        endDate: created.endDate,
+        nextStep: created.nextStep ?? null,
+        health: created.health ?? null,
+        lastProgressAt: created.lastProgressAt ?? null,
+        issues: [],
+        blockedBy: [],
+        blocks: [],
+      };
+      const burn: BurndownTaskInput = {
+        id: created.id,
+        title: created.title,
+        parentId: parent.id,
+        startDate: created.startDate,
+        endDate: created.endDate,
+        progress: created.progress ?? 0,
+        status: created.status,
+        health: created.health ?? null,
+        effortHours: created.effortHours ?? null,
+        assignee: created.assignee,
+        blocked: created.blocked ?? false,
+      };
+      onCreated(card, burn);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not add task");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const ownerName = (assignee ?? "").trim();
+  const ownerInitials = ownerName ? initialsOf(ownerName) : null;
+
+  return (
+    <form
+      className="ws-banner-form ws-add-task-form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        save();
+      }}
+    >
+      <label className="ws-banner-field ws-banner-field--full">
+        <span className="ws-banner-field-label">Task title</span>
+        <input
+          type="text"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="e.g. Calibrate alignment fixture"
+          autoFocus
+          required
+        />
+      </label>
+      <div className="ws-banner-form-row">
+        <label className="ws-banner-field">
+          <span className="ws-banner-field-label">Start</span>
+          <input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            required
+          />
+        </label>
+        <label className="ws-banner-field">
+          <span className="ws-banner-field-label">End</span>
+          <input
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            required
+          />
+        </label>
+        <label className="ws-banner-field">
+          <span className="ws-banner-field-label">Estimate (h)</span>
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={effort}
+            onChange={(e) => {
+              const v = e.target.value;
+              setEffort(v === "" ? "" : Number(v));
+            }}
+            placeholder="—"
+          />
+        </label>
+        <div className="ws-banner-field">
+          <span className="ws-banner-field-label">Owner</span>
+          <span className="ws-owner-wrap">
+            <button
+              type="button"
+              className={
+                "ws-owner-chip" +
+                (ownerInitials ? "" : " ws-owner-chip--empty")
+              }
+              onClick={() => setOwnerOpen((v) => !v)}
+            >
+              <span className="ws-owner-chip__avatar" aria-hidden>
+                {ownerInitials ?? "?"}
+              </span>
+              <span className="ws-owner-chip__name">
+                {ownerInitials ? ownerName : "Unassigned"}
+              </span>
+              <span className="ws-owner-chip__chev" aria-hidden>
+                ▾
+              </span>
+            </button>
+            {ownerOpen && (
+              <OwnerPicker
+                people={people}
+                currentAssignee={assignee}
+                onSelect={(name) => {
+                  setAssignee(name && name.trim() ? name.trim() : null);
+                  setOwnerOpen(false);
+                }}
+                onClose={() => setOwnerOpen(false)}
+              />
+            )}
+          </span>
+        </div>
+      </div>
+      {error && <p className="ws-error">{error}</p>}
+      <div className="ws-banner-form-actions">
+        <button
+          type="button"
+          className="ws-banner-btn"
+          onClick={onCancel}
+          disabled={saving}
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          className="ws-banner-btn ws-banner-btn--primary"
+          disabled={saving}
+        >
+          {saving ? "Adding…" : "Add task"}
         </button>
       </div>
     </form>

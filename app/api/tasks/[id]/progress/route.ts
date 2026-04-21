@@ -67,7 +67,20 @@ export async function POST(req: Request, ctx: RouteCtx) {
   // hide whose work moved the needle. 409 Conflict is the right signal
   // here: the resource state (has children) is incompatible with the
   // operation the client tried.
-  const childCountPre = await prisma.task.count({ where: { parentId: id } });
+  //
+  // IMPORTANT: open issues + legacy milestones are stored as child rows
+  // (`type: "ISSUE"` / `"MILESTONE"`) so every task that has an open
+  // issue linked to it looks like it has "subtasks" if we count rows
+  // naively. The rest of the app (/tasks, workstream view, Gantt,
+  // burndown) already excludes those types from hierarchy logic — this
+  // endpoint has to match or users can't push progress on leaf tasks
+  // that just happen to have an issue attached.
+  const childCountPre = await prisma.task.count({
+    where: {
+      parentId: id,
+      type: { notIn: ["ISSUE", "MILESTONE"] },
+    },
+  });
   if (childCountPre > 0) {
     return NextResponse.json(
       {

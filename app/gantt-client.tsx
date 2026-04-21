@@ -1188,7 +1188,32 @@ export default function GanttClient({
         ) as HTMLElement | null;
         const id = inner?.getAttribute("data-bar-id");
         if (id) {
-          setCriticalPathTargetId((prev) => (prev === id ? null : id));
+          // Shift-click is reserved for the critical-path lens so the
+          // primary click can do the thing users expect: open the bar
+          // editor to tweak dates, owner, progress, and hours directly.
+          if (ev.shiftKey) {
+            setCriticalPathTargetId((prev) => (prev === id ? null : id));
+            return;
+          }
+          // `inner` was nullish-asserted when we read its data-bar-id
+          // above; anchor the popover off the bar element itself.
+          const rect = inner!.getBoundingClientRect();
+          const POPOVER_W = 320;
+          const left = Math.max(
+            12,
+            Math.min(
+              window.innerWidth - POPOVER_W - 12,
+              rect.left + rect.width / 2 - POPOVER_W / 2,
+            ),
+          );
+          const top =
+            rect.bottom + 8 + 360 > window.innerHeight
+              ? Math.max(12, rect.top - 8 - 360)
+              : rect.bottom + 8;
+          setBarEditor({
+            taskId: id,
+            anchor: { top, left, width: POPOVER_W },
+          });
           return;
         }
       }

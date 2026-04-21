@@ -11,6 +11,7 @@ import type {
   BurndownTaskInput,
 } from "../burndown-chart";
 import WorkstreamClient, {
+  type CardDependency,
   type ChildCard,
   type LinkedIssue,
   type WorkstreamHeader,
@@ -41,7 +42,7 @@ export default async function WorkstreamPage({
   const { id } = await params;
   await ensurePersonTable();
 
-  const [all, rawPeople] = await Promise.all([
+  const [all, rawPeople, allDeps] = await Promise.all([
     prisma.task.findMany({
       orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
     }),
@@ -49,6 +50,7 @@ export default async function WorkstreamPage({
       orderBy: [{ active: "desc" }, { name: "asc" }],
       select: { id: true, name: true, role: true, active: true },
     }),
+    prisma.dependency.findMany(),
   ]);
   const parent = all.find((t) => t.id === id);
   if (!parent) notFound();
@@ -225,6 +227,35 @@ export default async function WorkstreamPage({
     issuesByTask.set(r.parentId!, arr);
   }
 
+  // Index dependencies both ways so a card can show what it's blocked
+  // by (predecessors) and what it blocks (successors). We also need the
+  // predecessor/dependent task metadata (title, dates, status) so the
+  // card can render a meaningful chip without a client-side lookup.
+  const taskById = new Map(all.map((t) => [t.id, t]));
+  const preds = new Map<string, typeof allDeps>();
+  const succs = new Map<string, typeof allDeps>();
+  for (const d of allDeps) {
+    const arrP = preds.get(d.dependentId) ?? [];
+    arrP.push(d);
+    preds.set(d.dependentId, arrP);
+    const arrS = succs.get(d.predecessorId) ?? [];
+    arrS.push(d);
+    succs.set(d.predecessorId, arrS);
+  }
+  const linkFor = (taskId: string): CardDependency | null => {
+    const t = taskById.get(taskId);
+    if (!t) return null;
+    return {
+      id: t.id,
+      title: t.title,
+      endDate: t.endDate.toISOString(),
+      startDate: t.startDate.toISOString(),
+      status: t.status,
+      progress: t.progress,
+      blocked: t.blocked,
+    };
+  };
+
   // One card per direct child. We pre-compute health here so a child card
   // renders its badge correctly even before the client performs any update.
   //
@@ -251,6 +282,16 @@ export default async function WorkstreamPage({
         status: t.status,
         now,
       });
+    const blockedBy: CardDependency[] = [];
+    for (const d of preds.get(t.id) ?? []) {
+      const link = linkFor(d.predecessorId);
+      if (link) blockedBy.push({ ...link, depType: d.type, lagDays: d.lagDays });
+    }
+    const blocks: CardDependency[] = [];
+    for (const d of succs.get(t.id) ?? []) {
+      const link = linkFor(d.dependentId);
+      if (link) blocks.push({ ...link, depType: d.type, lagDays: d.lagDays });
+    }
     return {
       id: t.id,
       title: t.title,
@@ -269,6 +310,8 @@ export default async function WorkstreamPage({
       health: h,
       lastProgressAt: t.lastProgressAt?.toISOString() ?? null,
       issues: issuesByTask.get(t.id) ?? [],
+      blockedBy,
+      blocks,
     };
   });
 

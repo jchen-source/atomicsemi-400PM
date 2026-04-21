@@ -3667,6 +3667,105 @@ button.ws-owner-chip:disabled {
   font-weight: 600;
 }
 
+/* ----- Dependencies list on a card -------------------------------- */
+.ws-card-deps {
+  padding: 6px 14px 10px;
+  border-top: 1px solid #f1f5f9;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ws-dep-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.ws-dep-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  font-weight: 600;
+  margin: 0;
+}
+.ws-dep-arrow {
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1;
+}
+.ws-dep-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.ws-dep-chip {
+  display: inline-flex;
+}
+.ws-dep-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 3px 9px;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  background: #ffffff;
+  font-size: 11.5px;
+  color: #1f2937;
+  text-decoration: none;
+  transition: border-color 0.1s ease, background 0.1s ease;
+}
+.ws-dep-link:hover {
+  border-color: #cbd5f5;
+  background: #f8fafc;
+}
+.ws-dep-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #94a3b8;
+  flex-shrink: 0;
+}
+.ws-dep-chip.is-done .ws-dep-dot {
+  background: #22c55e;
+}
+.ws-dep-chip.is-risk .ws-dep-dot {
+  background: #ef4444;
+}
+.ws-dep-chip.is-risk .ws-dep-link {
+  border-color: #fecaca;
+  background: #fff1f2;
+  color: #991b1b;
+}
+.ws-dep-chip.is-risk .ws-dep-link:hover {
+  border-color: #fca5a5;
+  background: #ffe4e6;
+}
+.ws-dep-chip.is-done .ws-dep-link {
+  color: #64748b;
+}
+.ws-dep-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+  font-weight: 500;
+}
+.ws-dep-meta {
+  color: #94a3b8;
+  font-size: 10.5px;
+  flex-shrink: 0;
+}
+.ws-dep-chip.is-risk .ws-dep-meta {
+  color: #b91c1c;
+}
+
 @theme inline {
   --color-background: rgb(var(--background));
   --color-foreground: rgb(var(--foreground));

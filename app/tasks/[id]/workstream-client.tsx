@@ -75,6 +75,21 @@ export type LinkedIssue = {
   linkedTaskId: string;
 };
 
+export type CardDependency = {
+  id: string;
+  title: string;
+  startDate: string;
+  endDate: string;
+  status: string;
+  progress: number;
+  blocked: boolean;
+  /** Relationship type: FS | SS | FF | SF. Surfaced in the tooltip so
+   *  users can tell an "ends before this starts" dependency apart from a
+   *  "starts together" one. */
+  depType?: string;
+  lagDays?: number;
+};
+
 export type ChildCard = {
   id: string;
   title: string;
@@ -93,6 +108,8 @@ export type ChildCard = {
   health: "green" | "yellow" | "red" | null;
   lastProgressAt: string | null;
   issues: LinkedIssue[];
+  blockedBy: CardDependency[];
+  blocks: CardDependency[];
 };
 
 export type WorkstreamSnapshot = {
@@ -1095,6 +1112,10 @@ function TaskCard({
         />
       )}
 
+      {(card.blockedBy.length > 0 || card.blocks.length > 0) && (
+        <DependencyList card={card} />
+      )}
+
       <footer className="ws-card-foot">
         <button
           type="button"
@@ -1638,6 +1659,87 @@ function FileIssueForm({
         </button>
       </div>
     </form>
+  );
+}
+
+// ---------- Dependencies on a card ----------
+
+/**
+ * Shows what a card is blocked by (upstream predecessors) and what it
+ * blocks (downstream successors). The rendering stays compact on purpose
+ * — this sits below the update form, so a dense chip list is friendlier
+ * than a full table. "At risk" flags a predecessor that isn't done yet
+ * and ends after this card's scheduled start (i.e. it'll slip us).
+ */
+function DependencyList({ card }: { card: ChildCard }) {
+  const cardStartMs = new Date(card.startDate).getTime();
+
+  const chipFor = (dep: CardDependency, direction: "up" | "down") => {
+    const isDone = dep.status === "DONE" || dep.progress >= 100;
+    const endsMs = new Date(dep.endDate).getTime();
+    // Upstream risk = a predecessor that hasn't finished yet and whose
+    // end slips past the point where we were supposed to start. That's
+    // the situation that actually needs attention in a standup. Any
+    // explicitly-blocked predecessor is also surfaced.
+    const atRisk =
+      (direction === "up" && !isDone && endsMs > cardStartMs) || dep.blocked;
+    const pct = Math.max(0, Math.min(100, dep.progress));
+    const end = new Date(dep.endDate).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+    });
+    const typeLabel =
+      dep.depType && dep.depType !== "FS" ? ` · ${dep.depType}` : "";
+    const title = `${dep.title} · ${pct}% · ends ${end}${typeLabel}${
+      dep.blocked ? " · blocked" : ""
+    }`;
+    return (
+      <li
+        key={`${direction}-${dep.id}`}
+        className={`ws-dep-chip${atRisk ? " is-risk" : ""}${
+          isDone ? " is-done" : ""
+        }`}
+      >
+        <Link href={`/tasks/${dep.id}`} title={title} className="ws-dep-link">
+          <span className="ws-dep-dot" aria-hidden />
+          <span className="ws-dep-title">{dep.title}</span>
+          <span className="ws-dep-meta">
+            {isDone ? "done" : `${pct}%`} · {end}
+          </span>
+        </Link>
+      </li>
+    );
+  };
+
+  return (
+    <section className="ws-card-deps">
+      {card.blockedBy.length > 0 && (
+        <div className="ws-dep-group">
+          <h4 className="ws-dep-heading">
+            <span className="ws-dep-arrow" aria-hidden>
+              ←
+            </span>
+            Blocked by ({card.blockedBy.length})
+          </h4>
+          <ul className="ws-dep-list">
+            {card.blockedBy.map((d) => chipFor(d, "up"))}
+          </ul>
+        </div>
+      )}
+      {card.blocks.length > 0 && (
+        <div className="ws-dep-group">
+          <h4 className="ws-dep-heading">
+            <span className="ws-dep-arrow" aria-hidden>
+              →
+            </span>
+            Blocks ({card.blocks.length})
+          </h4>
+          <ul className="ws-dep-list">
+            {card.blocks.map((d) => chipFor(d, "down"))}
+          </ul>
+        </div>
+      )}
+    </section>
   );
 }
 

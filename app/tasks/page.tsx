@@ -58,7 +58,8 @@ export default async function TasksPage() {
     }),
   ]);
 
-  // Exclude issues (/open-issues owns them) and the legacy MILESTONE rows.
+  // Exclude ISSUE rows (they're managed inline on workstream cards, not
+  // as first-class entries in the master list) and legacy MILESTONE rows.
   const workTasks = rawTasks.filter(
     (t) => t.type !== "ISSUE" && t.type !== "MILESTONE",
   );

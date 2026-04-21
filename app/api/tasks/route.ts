@@ -71,7 +71,6 @@ export async function POST(req: Request) {
   try {
     revalidatePath("/");
     revalidatePath("/tasks");
-    revalidatePath("/open-issues");
     if (result.task.parentId) {
       revalidatePath(`/tasks/${result.task.parentId}`);
     }

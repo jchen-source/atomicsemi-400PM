@@ -180,7 +180,6 @@ export async function PATCH(req: Request, ctx: RouteCtx) {
     if (updatedTask.parentId) {
       revalidatePath(`/tasks/${updatedTask.parentId}`);
     }
-    revalidatePath("/open-issues");
   } catch {
     // no-op outside request lifecycle
   }

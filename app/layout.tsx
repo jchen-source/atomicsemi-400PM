@@ -31,7 +31,6 @@ export default function RootLayout({
               <nav className="space-y-1 text-sm">
                 <SideLink href="/" label="Gantt Chart" />
                 <SideLink href="/tasks" label="Tasks" />
-                <SideLink href="/open-issues" label="Open Issues" />
                 <SideLink href="/people" label="Resource Matrix" />
                 <SideLink href="/settings" label="Settings" />
                 <SideLink href="/settings#notion" label="Notion Sync" />

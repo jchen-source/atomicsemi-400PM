@@ -251,13 +251,40 @@ function buildSeriesForLeaves(
   id: string,
   title: string,
   leaves: BurndownTaskInput[],
-  startMs: number,
-  endMs: number,
+  committedStartMs: number,
+  committedEndMs: number,
   parentBlocked: boolean,
   inputs: SeriesInputs,
 ): Series | null {
   if (leaves.length === 0) return null;
   const snapshotsByTask = indexSnapshots(inputs.snapshots);
+
+  // `inputs.nowMs` comes from the server render and is already stale by
+  // the time the user pushes an update — the new snapshot's `createdAt`
+  // (set on the server when it was written) can easily be a few seconds
+  // ahead of the rendered `nowMs`, and without this adjustment we'd drop
+  // the just-pushed point as "in the future" and the chart would appear
+  // unchanged. Normalize to the latest activity we can see.
+  const allSnapTs: number[] = [];
+  for (const l of leaves) {
+    for (const s of snapshotsByTask.get(l.id) ?? []) {
+      allSnapTs.push(new Date(s.createdAt).getTime());
+    }
+  }
+  const latestActivity = allSnapTs.length
+    ? Math.max(...allSnapTs)
+    : inputs.nowMs;
+  const effectiveNow = Math.max(inputs.nowMs, latestActivity);
+
+  // Chart window: widen past the committed dates whenever there's
+  // activity outside them, and always stretch to "now" so the current
+  // state is visible. The committed (scheduled) dates still drive the
+  // ideal line below — this just controls what the plot can show.
+  const earliestActivity = allSnapTs.length
+    ? Math.min(...allSnapTs)
+    : committedStartMs;
+  const startMs = Math.min(committedStartMs, earliestActivity);
+  const endMs = Math.max(committedEndMs, effectiveNow);
 
   // Per-leaf baseline: the stored estimate OR the highest remaining-hours
   // value ever reported in a snapshot for that leaf, whichever is bigger.
@@ -302,7 +329,10 @@ function buildSeriesForLeaves(
   for (const l of leaves) {
     for (const s of snapshotsByTask.get(l.id) ?? []) {
       const ts = new Date(s.createdAt).getTime();
-      if (ts > inputs.nowMs) continue; // never forecast into the future
+      // Guard against genuinely future-dated rows (e.g. bad seed data),
+      // but let the just-pushed snapshot through — `effectiveNow` was
+      // already advanced to include it above.
+      if (ts > effectiveNow) continue;
       const key = Math.floor(ts / bucketMs) * bucketMs;
       const arr = perBucket.get(key) ?? [];
       arr.push({ snap: s, leaf: l, ts });
@@ -330,7 +360,7 @@ function buildSeriesForLeaves(
         l,
         snapshotsByTask.get(l.id) ?? [],
         lastTs,
-        inputs.nowMs,
+        effectiveNow,
       );
     }
 
@@ -372,10 +402,14 @@ function buildSeriesForLeaves(
 
     return {
       t: lastTs,
-      displayT: clamp(lastTs, startMs, endMs),
+      // Chart window now covers every snapshot, so no clamping is needed.
+      // `preStart`/`postEnd` are kept for the tooltip message and are
+      // relative to the committed (scheduled) window, not the expanded
+      // chart window — they describe schedule violations, not layout.
+      displayT: lastTs,
       v: sum,
-      preStart: lastTs < startMs,
-      postEnd: lastTs > endMs,
+      preStart: lastTs < committedStartMs,
+      postEnd: lastTs > committedEndMs,
       comment: comment || undefined,
       sources,
       kind,
@@ -385,9 +419,11 @@ function buildSeriesForLeaves(
     };
   });
 
-  // Anchor the line: if there's no point at or before startMs, drop a
-  // baseline at (startMs, totalEffort) so the line starts honestly at the
-  // top-left of the chart instead of floating mid-air.
+  // Anchor the line: if there's no point at or before the chart's left
+  // edge, drop a baseline at (startMs, totalEffort) so the line starts
+  // honestly at the top-left instead of floating mid-air. `startMs` is
+  // already min(committedStart, earliestActivity) so this always lands
+  // on the leftmost visible x.
   if (actual.length === 0 || actual[0].t > startMs) {
     actual.unshift({
       t: startMs,
@@ -399,39 +435,41 @@ function buildSeriesForLeaves(
     });
   }
 
-  // Always include a "now" tip so the actual line reaches today (or the
-  // task's end, whichever comes first). No tooltip on this one — it's a
-  // synthetic marker, not something the user pushed.
-  const cutoffNow = Math.min(inputs.nowMs, endMs);
-  if (cutoffNow >= startMs) {
-    const lastT = actual[actual.length - 1].t;
-    if (cutoffNow > lastT) {
-      let sumNow = 0;
-      for (const l of leaves) {
-        sumNow += remainingAtLeaf(
-          l,
-          snapshotsByTask.get(l.id) ?? [],
-          inputs.nowMs,
-          inputs.nowMs,
-        );
-      }
-      actual.push({
-        t: cutoffNow,
-        displayT: cutoffNow,
-        v: sumNow,
-        preStart: false,
-        postEnd: false,
-        synthetic: true,
-      });
+  // Always include a "now" tip so the actual line reaches the chart's
+  // right edge — even when `now` is before the committed start (the
+  // team pushed progress ahead of schedule) or after the committed end
+  // (ran long). No tooltip on this one — it's a synthetic marker.
+  const lastT = actual[actual.length - 1].t;
+  if (effectiveNow > lastT) {
+    let sumNow = 0;
+    for (const l of leaves) {
+      sumNow += remainingAtLeaf(
+        l,
+        snapshotsByTask.get(l.id) ?? [],
+        effectiveNow,
+        effectiveNow,
+      );
     }
+    actual.push({
+      t: effectiveNow,
+      displayT: effectiveNow,
+      v: sumNow,
+      preStart: effectiveNow < committedStartMs,
+      postEnd: effectiveNow > committedEndMs,
+      synthetic: true,
+    });
   }
 
-  const span = Math.max(1, endMs - startMs);
+  // The ideal ("required") line always describes the *committed* schedule
+  // — not the expanded chart window — so health still reflects whether
+  // you're on track relative to what was promised.
+  const committedSpan = Math.max(1, committedEndMs - committedStartMs);
   const idealAt = (t: number) =>
-    totalEffort * (1 - clamp((t - startMs) / span, 0, 1));
+    totalEffort *
+    (1 - clamp((t - committedStartMs) / committedSpan, 0, 1));
 
   const remainingNow = actual[actual.length - 1]?.v ?? totalEffort;
-  const idealNow = idealAt(inputs.nowMs);
+  const idealNow = idealAt(effectiveNow);
   const health = classifyHealth(
     idealNow,
     remainingNow,
@@ -450,8 +488,8 @@ function buildSeriesForLeaves(
     completedNow: Math.max(0, totalEffort - remainingNow),
     idealNow,
     ideal: [
-      { t: startMs, v: totalEffort },
-      { t: endMs, v: 0 },
+      { t: committedStartMs, v: totalEffort },
+      { t: committedEndMs, v: 0 },
     ],
     actual,
     health,

@@ -127,6 +127,11 @@ export default function TasksClient({
   const [snapshots, setSnapshots] = useState<TaskSnapshot[]>([]);
   const [loadingSnapshots, setLoadingSnapshots] = useState(false);
   const [burnChartOpen, setBurnChartOpen] = useState(true);
+  // Inline "Add row" form. When set, the modal renders pre-filled with the
+  // given parent (`null` = top-level row). Closing wipes the state.
+  const [newRowParent, setNewRowParent] = useState<
+    { parentId: string | null } | null
+  >(null);
 
   // Burndown inputs — grow as the user saves updates in this session so the
   // project-wide strip and the in-drawer chart reflect new snapshots without
@@ -535,6 +540,20 @@ export default function TasksClient({
 
       <div className="tasks-shell">
         <div className="tasks-table-wrap">
+          <div className="tasks-table-toolbar">
+            <button
+              type="button"
+              className="roadmap-btn roadmap-btn--primary tasks-newrow-btn"
+              onClick={() => setNewRowParent({ parentId: null })}
+            >
+              <span aria-hidden className="tasks-newrow-plus">+</span>
+              New row
+            </button>
+            <span className="tasks-newrow-hint">
+              Tip: hover any program / workstream / task row to add a child
+              under it.
+            </span>
+          </div>
           <TasksTableHeader />
           {displayRows.mode === "flat" ? (
             displayRows.items.length === 0 ? (
@@ -547,6 +566,7 @@ export default function TasksClient({
                   remainingNow={remainingNowByTaskId.get(r.id) ?? null}
                   active={r.id === activeId}
                   collapsed={collapsed.has(r.id)}
+                  onAddChild={() => setNewRowParent({ parentId: r.id })}
                   onToggleCollapse={() =>
                     setCollapsed((prev) => {
                       const next = new Set(prev);
@@ -590,6 +610,7 @@ export default function TasksClient({
                     remainingNow={remainingNowByTaskId.get(r.id) ?? null}
                     active={r.id === activeId}
                     collapsed={false}
+                    onAddChild={() => setNewRowParent({ parentId: r.id })}
                     onToggleCollapse={() => {}}
                     onOpen={() => {
                       // Grouped views flatten hierarchy visually but keep
@@ -743,6 +764,23 @@ export default function TasksClient({
           />
         )}
       </div>
+
+      {newRowParent && (
+        <NewRowModal
+          parentId={newRowParent.parentId}
+          parentOptions={rows.map((r) => ({
+            id: r.id,
+            title: r.title,
+            depth: r.depth,
+            rowType: r.rowType,
+          }))}
+          onClose={() => setNewRowParent(null)}
+          onCreated={() => {
+            setNewRowParent(null);
+            router.refresh();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -929,6 +967,7 @@ function TasksRow({
   collapsed,
   onToggleCollapse,
   onOpen,
+  onAddChild,
 }: {
   row: TaskRow;
   remainingNow: number | null;
@@ -936,6 +975,11 @@ function TasksRow({
   collapsed: boolean;
   onToggleCollapse: () => void;
   onOpen: () => void;
+  /** Optional — when present, a hover-revealed "+" appears in the title
+   *  cell that opens the New row modal pre-parented to this row. We hide
+   *  it on bare leaf-level subtasks where another nesting level rarely
+   *  makes sense. */
+  onAddChild?: () => void;
 }) {
   const start = new Date(row.startDate);
   const end = new Date(row.endDate);
@@ -1000,6 +1044,20 @@ function TasksRow({
         <span className="tasks-title" title={row.title}>
           {row.title}
         </span>
+        {onAddChild && row.rowType !== "subtask" && (
+          <button
+            type="button"
+            className="tasks-row-add"
+            onClick={(e) => {
+              e.stopPropagation();
+              onAddChild();
+            }}
+            aria-label={`Add child under ${row.title}`}
+            title="Add child row"
+          >
+            +
+          </button>
+        )}
       </div>
       <div className="tasks-col tasks-col--owner" title={row.assignee ?? ""}>
         {row.assignee || <span className="tasks-muted">Unassigned</span>}
@@ -1119,7 +1177,7 @@ function HealthDot({ health }: { health: TaskRow["health"] }) {
 
 function EmptyState({ view }: { view: SavedView }) {
   const msg: Record<SavedView, string> = {
-    all: "No tasks yet. Add tasks from the Gantt.",
+    all: 'No tasks yet. Click "New row" above to add one.',
     inProgress: "No tasks are currently in progress.",
     blocked: "No blockers reported. Nice.",
     overdue: "Nothing overdue — keep it up.",
@@ -1131,6 +1189,270 @@ function EmptyState({ view }: { view: SavedView }) {
     byWorkstream: "No tasks grouped under a workstream.",
   };
   return <div className="tasks-empty">{msg[view]}</div>;
+}
+
+// ---------- New row modal ----------
+
+type NewRowParentOption = {
+  id: string;
+  title: string;
+  depth: number;
+  rowType: TaskRow["rowType"];
+};
+
+function NewRowModal({
+  parentId: initialParentId,
+  parentOptions,
+  onClose,
+  onCreated,
+}: {
+  parentId: string | null;
+  parentOptions: NewRowParentOption[];
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  // Sensible defaults: a 2-week window starting today, mirroring the
+  // /api/tasks usage pattern in gantt-client.tsx (which uses a 1-week
+  // window for blank Gantt creates). The longer default fits tool /
+  // delivery rows, which is the main use case from this page.
+  const today = useMemo(() => new Date(), []);
+  const defaultEnd = useMemo(() => {
+    const d = new Date(today);
+    d.setDate(d.getDate() + 14);
+    return d;
+  }, [today]);
+
+  const [title, setTitle] = useState("");
+  const [parentId, setParentId] = useState<string | null>(initialParentId);
+  const [status, setStatus] = useState<(typeof STATUS_OPTIONS)[number]>("TODO");
+  const [startDate, setStartDate] = useState<string>(toDateInput(today));
+  const [endDate, setEndDate] = useState<string>(toDateInput(defaultEnd));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const titleRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    titleRef.current?.focus();
+  }, []);
+
+  // Close on Escape, submit on ⌘/Ctrl+Enter for keyboard-friendly entry.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Sort parents: programs first, then workstreams, then tasks. Inside each
+  // bucket we keep title order so the dropdown is predictable.
+  const sortedParents = useMemo(() => {
+    const rank: Record<TaskRow["rowType"], number> = {
+      program: 0,
+      workstream: 1,
+      task: 2,
+      subtask: 3,
+    };
+    return [...parentOptions].sort(
+      (a, b) =>
+        rank[a.rowType] - rank[b.rowType] || a.title.localeCompare(b.title),
+    );
+  }, [parentOptions]);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (saving) return;
+    const cleanTitle = title.trim();
+    if (!cleanTitle) {
+      setError("Title is required");
+      return;
+    }
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      setError("Pick valid start and due dates");
+      return;
+    }
+    if (start.getTime() > end.getTime()) {
+      setError("Start must be on or before due");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: cleanTitle,
+          type: "TASK",
+          status,
+          startDate: start.toISOString(),
+          endDate: end.toISOString(),
+          parentId: parentId ?? undefined,
+          tags: [],
+          // sortOrder=9999 matches the Gantt-side create so a fresh row
+          // sorts to the bottom of its parent bucket instead of jumping
+          // ahead of established work.
+          sortOrder: 9999,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || "Create failed");
+      }
+      onCreated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Create failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      className="tasks-modal-backdrop"
+      role="presentation"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="tasks-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add new row"
+      >
+        <header className="tasks-modal-header">
+          <h2>Add new row</h2>
+          <button
+            type="button"
+            className="tasks-drawer-close"
+            onClick={onClose}
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </header>
+        <form className="tasks-modal-body" onSubmit={handleSubmit}>
+          <label className="tasks-field">
+            <span>Title</span>
+            <input
+              ref={titleRef}
+              type="text"
+              value={title}
+              maxLength={500}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Tool Delivery: Mask Aligner (MA3) x1"
+            />
+          </label>
+
+          <label className="tasks-field">
+            <span>Parent</span>
+            <select
+              value={parentId ?? ""}
+              onChange={(e) => setParentId(e.target.value || null)}
+            >
+              <option value="">— Top level (no parent) —</option>
+              {sortedParents.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {indentPrefix(p.depth)}
+                  {labelForParent(p)}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="tasks-modal-row">
+            <label className="tasks-field">
+              <span>Status</span>
+              <select
+                value={status}
+                onChange={(e) =>
+                  setStatus(e.target.value as (typeof STATUS_OPTIONS)[number])
+                }
+              >
+                {STATUS_OPTIONS.map((s) => (
+                  <option key={s} value={s}>
+                    {s === "IN_PROGRESS"
+                      ? "In progress"
+                      : s === "TODO"
+                        ? "To do"
+                        : s === "BLOCKED"
+                          ? "Blocked"
+                          : "Done"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="tasks-field">
+              <span>Start</span>
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+              />
+            </label>
+            <label className="tasks-field">
+              <span>Due</span>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+              />
+            </label>
+          </div>
+
+          {error && <p className="tasks-drawer-error">{error}</p>}
+
+          <div className="tasks-modal-actions">
+            <button
+              type="button"
+              className="roadmap-btn roadmap-btn--ghost"
+              onClick={onClose}
+              disabled={saving}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="roadmap-btn roadmap-btn--primary"
+              disabled={saving || !title.trim()}
+            >
+              {saving ? "Creating…" : "Create row"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function toDateInput(d: Date): string {
+  // <input type="date"> wants `YYYY-MM-DD` in local time. Using
+  // toISOString() would truncate to UTC and shift by a day for users
+  // west of UTC, so we format locally.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function indentPrefix(depth: number): string {
+  if (depth <= 0) return "";
+  return "  ".repeat(depth) + "↳ ";
+}
+
+function labelForParent(p: NewRowParentOption): string {
+  const tag =
+    p.rowType === "program"
+      ? "Program"
+      : p.rowType === "workstream"
+        ? "Workstream"
+        : p.rowType === "task"
+          ? "Task"
+          : "Subtask";
+  return `[${tag}] ${p.title}`;
 }
 
 // ---------- Drawer ----------
